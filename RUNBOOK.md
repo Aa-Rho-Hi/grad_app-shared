@@ -177,6 +177,74 @@ A professor opening an advisor URL gets a **403**, not a quiet redirect — bein
 without explanation hides the fact that the link they were sent isn't for them. They also
 can't act on a student outside their own queue even with the id in hand.
 
+## Running it on Google Cloud
+
+```bash
+./deploy/deploy.sh YOUR_PROJECT_ID          # you run this; it needs your gcloud login
+```
+
+Idempotent — re-run it to redeploy code; the database, bucket and secrets are
+left alone. It prints a one-time `/setup?token=…` link at the end, because a
+fresh instance has no accounts and would otherwise be an app with no login on a
+public URL. Remove `GRADAPP_SETUP_TOKEN` once you've claimed it.
+
+**Four environment variables switch the whole thing**, and each one is read in
+exactly one place so local behaviour can't drift:
+
+| Variable | Off (laptop) | On (cloud) |
+|---|---|---|
+| `GRADAPP_ENV` | `local` — friendly defaults | `cloud` — every default fails closed |
+| `GRADAPP_DATABASE_URL` | SQLite file | Cloud SQL Postgres |
+| `GRADAPP_BUCKET` | plain directory | files mirrored to Cloud Storage |
+| `GRADAPP_DATA` | `./data` | `/tmp` (ephemeral, and that's fine) |
+
+### What had to change, and why none of it shows up locally
+
+Every one of these is invisible on one machine and silent rather than loud on
+several — which is the whole reason they needed finding before a deploy rather
+than after.
+
+- **Files.** The container's disk is per-instance and wiped on restart, so a
+  roster uploaded through one instance is invisible to the next request. The
+  local directory is now a cache over the bucket: writes mirror out, reads pull
+  in on a miss. Passing bytes around instead of paths would have been the
+  "proper" fix and a much larger one — most of the pipeline hands real paths to
+  libraries that want real files (pandas, openpyxl, pypdf, Tesseract).
+- **Accounts and the faculty list.** `users.yaml` and `professors.yaml` look
+  like static config and aren't — the app writes both at runtime. In a container
+  they live on the image's own disk, so the advisor account created at `/setup`
+  would vanish on the next deploy. Both now go through the same mirroring.
+- **Job progress.** The browser polls `/jobs/<id>`; that request is
+  load-balanced, so it can land on an instance that never started the job, find
+  nothing, and leave the bar at zero while the upload is in fact working. State
+  is mirrored to a `jobs` table and reads fall back to it.
+
+### What it still doesn't do
+
+The ingest **thread** still runs on whichever instance received the upload. If
+that instance is recycled mid-ingest the work stops; the poller notices the
+heartbeat has gone stale and says so rather than spinning forever, and whatever
+was already read is saved because ingest writes as it goes. A real queue (Cloud
+Tasks, or a worker service) is the fix, and is worth doing if ingests get long
+enough for it to matter.
+
+### Cost, and the seasonal trap
+
+Roughly **$12–15/month**, almost entirely Cloud SQL (~$8 compute + ~$2 storage).
+Cloud Run scales to zero and a committee stays inside its free tier.
+
+Cloud SQL does **not** scale to zero, and admissions is about three months of the
+year — left alone you pay twelve months for three months of use. Out of season:
+
+```bash
+gcloud sql instances patch grad-app-db --no-activation-policy   # stop
+gcloud sql instances patch grad-app-db --activation-policy=ALWAYS
+```
+
+You keep paying storage (~$2) but not compute. `db-f1-micro` also has no SLA and
+is meant for low traffic — fine for a pilot, worth revisiting before a real cycle
+depends on it.
+
 ### Asking for an account
 
 The sign-in page has a **Create account** button. It creates a *request*, not access:

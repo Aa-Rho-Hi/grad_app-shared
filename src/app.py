@@ -65,6 +65,7 @@ from .triage import (PROF_DECISIONS, SWIPES, ProfessorError, add_professor,
                      professor_by_id, professor_deck, queues, remove_professor,
                      save_professors, shortlisted, update_professor)
 from .status_report import write_status_report
+from .storage import blobs_for, use_for_config
 from .store import Store, db_path_for
 from .users import (ADVISOR, PENDING, PROFESSOR, UserError, add_user,
                     approve_user, authenticate, linked_professors, load_users,
@@ -72,7 +73,12 @@ from .users import (ADVISOR, PENDING, PROFESSOR, UserError, add_user,
                     request_account, save_users)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = os.path.join(ROOT, "data")
+
+# Scratch space for uploads and generated files. Overridable because a
+# container's application directory isn't a sensible place to write — on Cloud
+# Run this points at /tmp, and storage.py mirrors anything that matters to the
+# bucket, so losing it on restart costs nothing.
+DATA = os.environ.get("GRADAPP_DATA", "").strip() or os.path.join(ROOT, "data")
 FIELD_MAP = os.path.join(ROOT, "config", "csv_field_map.yaml")
 
 # Extensions accepted per upload route, checked before a file ever touches
@@ -120,6 +126,13 @@ def _safe_name(filename: str, default: str) -> str:
     return stem[:_MAX_NAME] + ext[:16] if len(name) > _MAX_NAME else name
 
 
+def _blobs():
+    """File storage for the current data directory — local disk, mirrored to a
+    bucket when GRADAPP_BUCKET is set. Resolved per call rather than once at
+    import, because DATA is monkeypatched per test."""
+    return blobs_for(DATA)
+
+
 def _save_upload(file, dest: str) -> bool:
     """Sniff the file's signature before writing it to disk. Returns False
     (and does not save) if the content doesn't match what the extension
@@ -128,9 +141,18 @@ def _save_upload(file, dest: str) -> bool:
     file.stream.seek(0)
     if not _sniff_ok(file.filename, head):
         return False
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    file.save(dest)
+    _blobs().save_upload(file, dest)
     return True
+
+
+def _serve(path: str, download_name: str):
+    """Send a generated file, fetching it from the bucket first if this
+    instance isn't the one that made it. Without this, downloading the review
+    sheet works only if your request happens to land on the same container that
+    built it — which it does in testing and doesn't in production."""
+    if not _blobs().ensure(path):
+        abort(404)
+    return send_file(path, as_attachment=True, download_name=download_name)
 
 
 app = Flask(__name__, template_folder=os.path.join(ROOT, "templates"))
@@ -586,6 +608,17 @@ def _store() -> Store:
     return Store(db_path_for(DATA))
 
 
+# Share job progress through the store, so a poll that lands on a different
+# instance than the one doing the ingest can still answer. On a laptop this
+# resolves to the same SQLite file and costs a row per job.
+jobs.use_store(_store)
+
+# users.yaml and professors.yaml are written while the app runs, so in a
+# container they need the same bucket treatment as uploads — otherwise the
+# advisor account created at /setup is gone on the next deploy.
+use_for_config(blobs_for(DATA))
+
+
 def _summaries() -> List[Dict[str, Any]]:
     return _store().index()
 
@@ -772,9 +805,9 @@ def download_status():
         return redirect(url_for("index"))
     path = os.path.join(DATA, "reports", "applicant_status.xlsx")
     write_status_report(entries, load_professors(), path)
+    _blobs().publish(path)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return send_file(path, as_attachment=True,
-                     download_name=f"applicant_status_{stamp}.xlsx")
+    return _serve(path, f"applicant_status_{stamp}.xlsx")
 
 
 # One page of applicant cards. Each card carries a full summary, so rendering
@@ -852,11 +885,7 @@ def _clear_processed(purge_raw: bool = False) -> int:
     store = _store()
     n = store.clear_students()
     store.clear_quarantine()
-    report = os.path.join(DATA, "reports", "_summaries.md")
-    try:
-        os.remove(report)
-    except OSError:
-        pass
+    _blobs().remove(os.path.join(DATA, "reports", "_summaries.md"))
     # Legacy pre-SQLite stores (data/students/*.json, data/quarantine/*.json)
     # hold the same derived PII as the database — clear them too, or "Clear
     # all" silently leaves full applicant records on disk.
@@ -870,6 +899,10 @@ def _clear_processed(purge_raw: bool = False) -> int:
                         pass
     if purge_raw:
         raw = os.path.join(DATA, "raw")
+        # Bucket first: these are the applicants' original files, and leaving
+        # them in Cloud Storage while telling the advisor they were deleted is
+        # the worst possible outcome of this button.
+        _blobs().remove_tree(raw)
         for root, _dirs, files in os.walk(raw):
             for fn in files:
                 try:
@@ -1147,13 +1180,19 @@ def review_sheet():
         flash("No applicants yet — upload a file first.")
         return redirect(url_for("index"))
     out = os.path.join(DATA, "reports", "applicants_review.xlsx")
+    raw = os.path.join(DATA, "raw")
     try:
-        write_review_sheet(entries, os.path.join(DATA, "raw"), out)
+        # This reads the roster the advisor originally uploaded, to preserve
+        # every one of their columns. On more than one instance that upload
+        # probably landed somewhere else.
+        _blobs().ensure_tree(raw)
+        write_review_sheet(entries, raw, out)
+        _blobs().publish(out)
     except Exception as exc:
         app.logger.exception("Error building the review spreadsheet")
         flash(f"Could not build the review spreadsheet: {exc}")
         return redirect(url_for("index"))
-    return send_file(out, as_attachment=True, download_name="applicants_review.xlsx")
+    return _serve(out, "applicants_review.xlsx")
 
 
 @app.route("/summaries")
@@ -1183,7 +1222,8 @@ def download_summaries():
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(summaries_markdown(entries))
-    return send_file(path, as_attachment=True, download_name="applicant_summaries.md")
+    _blobs().publish(path)
+    return _serve(path, "applicant_summaries.md")
 
 
 @app.route("/triage")

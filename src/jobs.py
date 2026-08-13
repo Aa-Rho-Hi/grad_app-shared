@@ -4,24 +4,82 @@ Reading a batch of scanned packets takes minutes — OCR is the slow part — an
 browser sitting on a blank POST for that long looks broken. A job runs on a
 worker thread while the page polls `progress()` and shows what's being read now.
 
-Deliberately tiny: one process, one dict, no queue and no persistence. This is a
-single-reviewer local tool; a job that dies with the process is a job whose work
-the user will just run again. Anything durable belongs in the store, and the
-ingest functions already write there as they go, so a crashed job leaves the
-records it already merged rather than nothing.
+On one machine that's a dict: a job that dies with the process is a job whose
+work the user will just run again, and the ingest functions write to the store
+as they go, so a crash leaves the records already merged rather than nothing.
+
+Across several instances the dict alone is wrong, and wrong in a way that looks
+like a hang. The browser polls `/jobs/<id>`; that request is load-balanced, so
+it lands on an instance that never started the job, finds nothing, and the
+progress bar sits at zero forever while the upload is in fact working. So when
+a shared store is configured, state is mirrored into a `jobs` table and reads
+fall back to it. The dict stays as the fast path for the instance actually
+running the work.
+
+What this does **not** do is move the work. The thread still runs on whichever
+instance received the upload, so if that instance is recycled mid-ingest the job
+stops — the poller then sees a job whose heartbeat has gone stale and says so,
+instead of spinning. A real queue (Cloud Tasks, a worker service) is the fix for
+that, and is worth doing if ingests ever get long enough for it to bite.
 """
 from __future__ import annotations
 
+import json
 import threading
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
 # job_id -> state. Capped so a long-lived server can't grow unboundedly.
 _JOBS: Dict[str, Dict[str, Any]] = {}
 _LOCK = threading.Lock()
 _MAX_JOBS = 40
+
+#: Set by the app when a store is available, so jobs can be shared between
+#: instances. Left None on a laptop, where the dict is the whole story.
+_STORE_FACTORY: Optional[Callable[[], Any]] = None
+
+#: How long a job can go without a heartbeat before a poller should assume the
+#: instance running it is gone. Generous: OCR on a big packet is slow, and
+#: calling a live job dead is worse than taking a while to notice a dead one.
+STALE_AFTER = timedelta(minutes=5)
+
+
+def use_store(factory: Optional[Callable[[], Any]]) -> None:
+    """Share job state through this store, so any instance can report on it."""
+    global _STORE_FACTORY
+    _STORE_FACTORY = factory
+
+
+def _shared():
+    if _STORE_FACTORY is None:
+        return None
+    try:
+        return _STORE_FACTORY()
+    except Exception:
+        return None            # never let bookkeeping break the actual work
+
+
+def _persist(job: Dict[str, Any]) -> None:
+    store = _shared()
+    if store is None:
+        return
+    try:
+        store.put_job(job["id"], json.dumps(job))
+    except Exception:
+        pass
+
+
+def _load(job_id: str) -> Optional[Dict[str, Any]]:
+    store = _shared()
+    if store is None:
+        return None
+    try:
+        raw = store.get_job(job_id)
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
 
 
 def _now() -> str:
@@ -44,6 +102,10 @@ class Progress:
             job = _JOBS.get(self.job_id)
             if job:
                 job.update(fields)
+                job["heartbeat"] = _now()
+                snapshot = dict(job)
+        if job:
+            _persist(snapshot)
 
     def stage(self, label: str) -> None:
         """A phase change with no countable items yet (reading a spreadsheet)."""
@@ -62,7 +124,9 @@ def start(fn: Callable[[Progress], Any], label: str = "Working…") -> str:
                     break
         _JOBS[job_id] = {"id": job_id, "started": _now(), "done": False,
                          "label": label, "done_count": 0, "total": 0,
-                         "result": None, "error": None}
+                         "result": None, "error": None, "heartbeat": _now()}
+        snapshot = dict(_JOBS[job_id])
+    _persist(snapshot)
     progress = Progress(job_id)
 
     def _run():
@@ -79,10 +143,37 @@ def start(fn: Callable[[Progress], Any], label: str = "Working…") -> str:
     return job_id
 
 
+def _is_stale(job: Dict[str, Any]) -> bool:
+    beat = job.get("heartbeat") or job.get("started")
+    if job.get("done") or not beat:
+        return False
+    try:
+        last = datetime.fromisoformat(beat)
+    except ValueError:
+        return False
+    return datetime.now(timezone.utc) - last > STALE_AFTER
+
+
 def get(job_id: str) -> Optional[Dict[str, Any]]:
+    """This instance's copy if it has one, otherwise the shared one.
+
+    The local dict wins because it's authoritative for a job this instance is
+    running — the shared row is only as fresh as the last heartbeat.
+    """
     with _LOCK:
         job = _JOBS.get(job_id)
-        return dict(job) if job else None
+        job = dict(job) if job else None
+    if job is None:
+        job = _load(job_id)
+    if job and _is_stale(job):
+        # Somebody has to tell the browser to stop spinning. The work may have
+        # partly completed — ingest writes as it goes — so this says "lost",
+        # not "failed", and the applicant list will show what did land.
+        job = {**job, "done": True, "label": "Interrupted",
+               "error": "The instance running this job stopped responding. "
+                        "Anything already read has been saved — reload the "
+                        "applicant list to see, then re-upload the rest."}
+    return job
 
 
 def _reset_for_tests() -> None:

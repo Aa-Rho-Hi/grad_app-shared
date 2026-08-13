@@ -24,8 +24,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
+from .storage import pull_config, push_config
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROFESSORS_YAML = os.path.join(ROOT, "config", "professors.yaml")
+PROFESSORS_YAML = (os.environ.get("GRADAPP_PROFESSORS_FILE", "").strip()
+                   or os.path.join(ROOT, "config", "professors.yaml"))
 
 SHORTLIST, REJECT, UNDO = "shortlist", "reject", "undo"
 SWIPES = (SHORTLIST, REJECT, UNDO)
@@ -55,8 +58,10 @@ _CARD_ITEM_CHARS = 260
 def load_professors(path: Optional[str] = None) -> List[Dict[str, Any]]:
     """The faculty list, in file order. Missing file -> no professors, not a
     crash: the rest of the app still works without the queue step."""
+    path = path or PROFESSORS_YAML
+    pull_config(path)
     try:
-        with open(path or PROFESSORS_YAML, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
     except OSError:
         return []
@@ -186,6 +191,7 @@ def save_professors(professors: Sequence[Dict[str, Any]],
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(_YAML_HEADER + body)
     os.replace(tmp, path)
+    push_config(path)
     return path
 
 

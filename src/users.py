@@ -33,8 +33,15 @@ from typing import Any, Dict, List, Optional
 import yaml
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from .storage import pull_config, push_config
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-USERS_YAML = os.path.join(ROOT, "config", "users.yaml")
+
+# Overridable because in a container config/ is part of the image and therefore
+# ephemeral: an account created at /setup would be gone on the next deploy.
+# Point this inside the data directory and storage.py keeps it in the bucket.
+USERS_YAML = (os.environ.get("GRADAPP_USERS_FILE", "").strip()
+              or os.path.join(ROOT, "config", "users.yaml"))
 
 ADVISOR, PROFESSOR = "advisor", "professor"
 ROLES = (ADVISOR, PROFESSOR)
@@ -64,8 +71,10 @@ class UserError(ValueError):
 
 
 def load_users(path: Optional[str] = None) -> List[Dict[str, Any]]:
+    path = path or USERS_YAML
+    pull_config(path)
     try:
-        with open(path or USERS_YAML, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
     except OSError:
         return []
@@ -92,6 +101,7 @@ def save_users(users, path: Optional[str] = None) -> str:
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(_HEADER + body)
     os.replace(tmp, path)
+    push_config(path)
     return path
 
 

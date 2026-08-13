@@ -1,0 +1,26 @@
+# Keep applicant data out of the image. data/ holds raw uploads and the local
+# SQLite store; baking it into a container that gets pushed to a registry would
+# put real applicant files somewhere nobody expects to find them.
+data/
+config/users.yaml
+
+# Local secrets
+.env
+*.env
+
+.git/
+.github/
+.pytest_cache/
+__pycache__/
+*.pyc
+.coverage
+.coverage.*
+.venv/
+venv/
+
+tests/
+docs/
+*.md
+!requirements*.txt
+
+.DS_Store

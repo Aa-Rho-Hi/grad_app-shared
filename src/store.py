@@ -82,6 +82,10 @@ _DDL = (
     " name   TEXT,"
     " index_json TEXT,"
     " updated_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS jobs ("
+    " id TEXT PRIMARY KEY,"
+    " state TEXT NOT NULL,"
+    " updated_at TEXT)",
     "CREATE TABLE IF NOT EXISTS quarantine ("
     " id INTEGER PRIMARY KEY AUTOINCREMENT,"
     " source_row INTEGER,"
@@ -129,6 +133,10 @@ _PG_DDL = (
     " record TEXT NOT NULL,"
     " name   TEXT,"
     " index_json TEXT,"
+    " updated_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS jobs ("
+    " id TEXT PRIMARY KEY,"
+    " state TEXT NOT NULL,"
     " updated_at TEXT)",
     "CREATE TABLE IF NOT EXISTS quarantine ("
     " id BIGSERIAL PRIMARY KEY,"
@@ -619,6 +627,37 @@ class Store:
     def clear_quarantine(self) -> None:
         with self._writing() as conn:
             conn.execute("DELETE FROM quarantine")
+
+    # ---- jobs -----------------------------------------------------------
+    #
+    # Only here so a progress poll that lands on a different instance than the
+    # one doing the work can still answer. Deliberately a dumb key/value blob:
+    # nothing queries inside it, and giving it real columns would invite
+    # someone to think this is a job queue. It isn't — see src/jobs.py.
+
+    def put_job(self, job_id: str, state: str) -> None:
+        with self._writing() as conn:
+            conn.execute(
+                "INSERT INTO jobs(id, state, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                " state=excluded.state, updated_at=excluded.updated_at",
+                (job_id, state, _now()))
+
+    def get_job(self, job_id: str) -> Optional[str]:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT state FROM jobs WHERE id=?",
+                               (job_id,)).fetchone()
+            return row["state"] if row else None
+        finally:
+            conn.close()
+
+    def prune_jobs(self, keep: int = 200) -> None:
+        """Bounded, so a long-lived server doesn't accumulate them forever."""
+        with self._writing() as conn:
+            conn.execute(
+                "DELETE FROM jobs WHERE id NOT IN "
+                "(SELECT id FROM jobs ORDER BY updated_at DESC LIMIT ?)", (keep,))
 
     # ---- reconcile ------------------------------------------------------
     def reconcile(self) -> int:
