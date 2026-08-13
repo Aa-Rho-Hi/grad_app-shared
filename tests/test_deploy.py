@@ -126,6 +126,18 @@ def test_cloud_enforces_the_longer_password(tmp_path, monkeypatch):
         assert not usersmod.load_users(), "a 4-character password was accepted"
 
 
+def test_cloud_infrastructure_without_cloud_mode_refuses_to_boot(monkeypatch):
+    """The dangerous middle state: real infrastructure wired up, guardrails off,
+    and nothing about it looks wrong. A gcloud deploy that repeats
+    --set-env-vars keeps only the last one, which drops GRADAPP_ENV and leaves
+    everything else — exactly this."""
+    for var in ("GRADAPP_DATABASE_URL", "GRADAPP_BUCKET", "GRADAPP_TASK_QUEUE"):
+        with pytest.raises(SystemExit) as e:
+            with app_with({var: "something-real"}, monkeypatch):
+                pass
+        assert var in str(e.value) and "GRADAPP_ENV" in str(e.value)
+
+
 def test_local_defaults_are_untouched(monkeypatch):
     """The whole point is that developing on a laptop stays pleasant."""
     with app_with({}, monkeypatch) as appmod:

@@ -165,6 +165,23 @@ app = Flask(__name__, template_folder=os.path.join(ROOT, "templates"))
 DEPLOYMENT = os.environ.get("GRADAPP_ENV", "local").strip().lower()
 IS_CLOUD = DEPLOYMENT != "local"
 
+# Guardrail against a half-applied configuration. If cloud infrastructure is
+# wired up but GRADAPP_ENV never arrived, the app would come up in local mode --
+# no forced HTTPS cookies, a 4-character password floor, and happy to serve
+# applicant data with no login at all -- and nothing about it would look wrong.
+# That is not hypothetical: repeating --set-env-vars in a gcloud deploy silently
+# keeps only the last one, which drops GRADAPP_ENV and leaves the rest.
+if not IS_CLOUD:
+    _CLOUD_SIGNS = [name for name in
+                    ("GRADAPP_DATABASE_URL", "GRADAPP_BUCKET", "GRADAPP_TASK_QUEUE")
+                    if os.environ.get(name, "").strip()]
+    if _CLOUD_SIGNS:
+        raise SystemExit(
+            f"{', '.join(_CLOUD_SIGNS)} is set but GRADAPP_ENV is "
+            f"{DEPLOYMENT!r}. That combination means the cloud guardrails are "
+            "off on what looks like a real deployment. Set GRADAPP_ENV=cloud, "
+            "or unset those variables to run locally.")
+
 # Guardrail: never ship a hardcoded secret key -- it's visible to anyone who
 # reads this file and would let them forge the signed session/flash cookie.
 #

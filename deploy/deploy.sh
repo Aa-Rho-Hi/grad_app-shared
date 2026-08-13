@@ -161,11 +161,12 @@ gcloud run deploy "$SERVICE" \
   --region "$REGION" \
   --service-account "$SA_EMAIL" \
   --add-cloudsql-instances "$CONNECTION" \
-  --set-env-vars "GRADAPP_ENV=cloud,GRADAPP_BUCKET=${BUCKET},GRADAPP_DATA=/tmp/gradapp-data" \
-  --set-env-vars "GRADAPP_USERS_FILE=/tmp/gradapp-data/config/users.yaml" \
-  --set-env-vars "GRADAPP_PROFESSORS_FILE=/tmp/gradapp-data/config/professors.yaml" \
-  --set-secrets "GRADAPP_DATABASE_URL=grad-app-db-url:latest" \
-  --set-secrets "GRADAPP_SECRET_KEY=grad-app-secret-key:latest,GRADAPP_SETUP_TOKEN=grad-app-setup-token:latest" \
+  `# One flag each, comma-separated. Repeating --set-env-vars does NOT merge:` \
+  `# gcloud takes the last occurrence and silently drops the rest, which would` \
+  `# leave GRADAPP_ENV unset and boot the container in local mode -- SQLite, no` \
+  `# bucket, and none of the cloud guardrails, with nothing to indicate it.` \
+  --set-env-vars "GRADAPP_ENV=cloud,GRADAPP_BUCKET=${BUCKET},GRADAPP_DATA=/tmp/gradapp-data,GRADAPP_USERS_FILE=/tmp/gradapp-data/config/users.yaml,GRADAPP_PROFESSORS_FILE=/tmp/gradapp-data/config/professors.yaml" \
+  --set-secrets "GRADAPP_DATABASE_URL=grad-app-db-url:latest,GRADAPP_SECRET_KEY=grad-app-secret-key:latest,GRADAPP_SETUP_TOKEN=grad-app-setup-token:latest" \
   --memory 2Gi --cpu 2 --timeout 900 \
   --min-instances 0 --max-instances 4 \
   --allow-unauthenticated
