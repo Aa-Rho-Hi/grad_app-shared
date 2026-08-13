@@ -132,6 +132,33 @@ def authenticate(username: str, password: str,
     return found if (found and ok) else None
 
 
+def _vet_professor(role: str, professor: str) -> str:
+    """A professor login must point at somebody on the faculty list.
+
+    The link is what tells the app whose queue to show, so an account naming an
+    id that doesn't exist isn't a small inconsistency — the person signs in,
+    lands on their deck, and sees an empty queue forever with nothing to
+    indicate why. The CLI checked this and the web routes didn't; it lives here
+    now so every path that can mint an account gets the same answer.
+    """
+    if role != PROFESSOR:
+        return ""
+    from .triage import load_professors        # local: triage imports upward
+    faculty = load_professors()
+    if not faculty:
+        raise UserError(
+            "There are no professors on the faculty list yet. Add one under "
+            "Professor queues first — a professor login has to point at "
+            "someone who exists.")
+    if not professor:
+        raise UserError("A professor account has to name someone on the "
+                        "faculty list.")
+    if not any(p["id"] == professor for p in faculty):
+        raise UserError(f"No professor with id {professor!r} on the faculty "
+                        "list (see config/professors.yaml).")
+    return professor
+
+
 def _vet_new(users: List[Dict[str, Any]], username: str, password: str) -> str:
     username = (username or "").strip()
     if not username:
@@ -147,9 +174,7 @@ def add_user(users: List[Dict[str, Any]], username: str, password: str, role: st
              professor: str = "") -> List[Dict[str, Any]]:
     if role not in ROLES:
         raise UserError(f"Role must be one of {', '.join(ROLES)}.")
-    if role == PROFESSOR and not professor:
-        raise UserError("A professor account must name a professor id "
-                        "(see config/professors.yaml).")
+    professor = _vet_professor(role, professor)
     username = _vet_new(users, username, password)
     return list(users) + [{"username": username, "role": role,
                            "professor": professor,
@@ -174,9 +199,7 @@ def approve_user(users: List[Dict[str, Any]], username: str, role: str,
     """Grant a pending request the role an advisor picked for it."""
     if role not in ROLES:
         raise UserError(f"Role must be one of {', '.join(ROLES)}.")
-    if role == PROFESSOR and not professor:
-        raise UserError("A professor account must name a professor id "
-                        "(see config/professors.yaml).")
+    professor = _vet_professor(role, professor)
     out, hit = [], False
     for u in users:
         if u["username"] == username and u["role"] == PENDING:
@@ -224,20 +247,14 @@ def main() -> None:
 
     users = load_users()
     if args.cmd == "add":
-        if args.role == PROFESSOR and not any(
-                p["id"] == args.professor for p in load_professors()):
-            raise SystemExit(f"No professor with id {args.professor!r} — "
-                             "check config/professors.yaml.")
+        # The faculty-list check lives in add_user now, so the CLI and the web
+        # can't disagree about what a valid professor account looks like.
         save_users(add_user(users, args.username, args.password, args.role, args.professor))
         print(f"Added {args.username} ({args.role}).")
     elif args.cmd == "remove":
         save_users(remove_user(users, args.username))
         print(f"Removed {args.username}.")
     elif args.cmd == "approve":
-        if args.role == PROFESSOR and not any(
-                p["id"] == args.professor for p in load_professors()):
-            raise SystemExit(f"No professor with id {args.professor!r} — "
-                             "check config/professors.yaml.")
         save_users(approve_user(users, args.username, args.role, args.professor))
         print(f"Approved {args.username} as {args.role}.")
     elif args.cmd == "demo":

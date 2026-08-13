@@ -493,7 +493,8 @@ def setup():
             flash(str(exc))
             return redirect(url_for("setup"))
         session["user"] = {"username": username, "role": ADVISOR, "professor": ""}
-        flash(f"Signed in as {username}. Add logins for your professors under Accounts.")
+        flash(f"Signed in as {username}. Your professors sign up themselves — "
+              "approve them under Accounts.")
         return redirect(url_for("accounts"))
     return render_template("setup.html")
 
@@ -525,25 +526,14 @@ def accounts_approve():
     return redirect(url_for("accounts"))
 
 
-@app.route("/accounts/add", methods=["POST"])
-@role_required(ADVISOR)
-@limiter.limit("60/hour")
-def accounts_add():
-    password = request.form.get("password", "")
-    if len(password) < _MIN_PASSWORD:
-        flash(f"Use at least {_MIN_PASSWORD} characters.")
-        return redirect(url_for("accounts"))
-    if password != request.form.get("confirm", password):
-        flash("Those passwords don't match.")
-        return redirect(url_for("accounts"))
-    try:
-        people = add_user(load_users(), request.form.get("username", ""), password,
-                          request.form.get("role", ""), request.form.get("professor", ""))
-        save_users(people)
-        flash(f"Added {request.form.get('username', '').strip()}.")
-    except UserError as exc:
-        flash(str(exc))
-    return redirect(url_for("accounts"))
+#
+# There is deliberately no route here for an advisor to create someone else's
+# login. Everyone picks their own password: the first advisor at /setup, and
+# everyone after that at /signup, where the advisor's job is to approve the
+# request and say what the person is. An advisor typing a colleague's password
+# means that password exists in a third place -- their head, the handover
+# message, and the hash -- and it is the one path that can't be made safe by
+# hashing. `python -m src.users add` remains for genuine out-of-band cases.
 
 
 @app.route("/accounts/remove", methods=["POST"])

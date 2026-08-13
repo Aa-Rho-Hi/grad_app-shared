@@ -195,7 +195,21 @@ deliberate, and worth leaving alone:
   exists" on a form anyone can reach is a staff directory.
 
 The requester never picks their own role; the advisor sets it at approval. Reject
-removes the request. From the CLI:
+removes the request.
+
+**A professor login has to point at somebody on the faculty list.** That link is
+how the app knows whose queue to show, so an account naming an id that doesn't
+exist isn't a small inconsistency — the person signs in, lands on their deck,
+and sees an empty queue forever with nothing to say why. Approval is refused
+until the faculty entry exists, and if the list is empty the Accounts page says
+so and sends you to add one. The rule lives in `users._vet_professor`, so the
+CLI and the web can't drift; the check used to be CLI-only, which is exactly how
+the web route came to accept a made-up id.
+
+**No advisor ever sets someone else's password.** There's deliberately no route
+for it. A password typed on a colleague's behalf exists in your head and in
+whatever you sent it over, and hashing on this end doesn't fix either. The order
+is: add the faculty entry, they sign up, you approve. From the CLI:
 
 ```bash
 python -m src.users list                                  # shows pending separately

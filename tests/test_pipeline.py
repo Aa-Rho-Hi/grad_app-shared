@@ -1374,11 +1374,18 @@ def test_first_account_is_created_from_the_browser(tmp_path, monkeypatch):
     r = client.get("/setup")
     assert r.status_code == 302 and "/login" in r.headers["Location"]
 
-    # the advisor adds a professor login from the UI
-    client.post("/accounts/add", data={"username": "pgratz", "password": "longenough",
-                                       "role": "professor", "professor": "gratz-paul"},
-                follow_redirects=True)
+    # There is no route for an advisor to set someone else's password — the
+    # professor signs up and the advisor approves.
+    assert "accounts_add" not in {r.endpoint for r in appmod.app.url_map.iter_rules()}
+
+    client.get("/logout")
+    client.post("/signup", data={"username": "pgratz", "password": "longenough",
+                                 "confirm": "longenough"})
+    client.post("/login", data={"username": "maya", "password": "longenough"})
+    client.post("/accounts/approve", data={"username": "pgratz", "role": "professor",
+                                           "professor": "gratz-paul"})
     assert {u["username"] for u in usersmod.load_users(path)} == {"maya", "pgratz"}
+
     # and can't lock themselves out
     r = client.post("/accounts/remove", data={"username": "maya"}, follow_redirects=True)
     assert b"signed in with" in r.data
@@ -1479,6 +1486,84 @@ def test_advisor_approves_and_assigns_the_role(tmp_path, monkeypatch):
     client.post("/login", data={"username": "newprof", "password": "pw1234"})
     assert client.get("/prof").status_code == 200
     assert client.get("/applicants").status_code == 403       # still not an advisor
+
+
+def test_a_professor_login_must_point_at_real_faculty(tmp_path, monkeypatch):
+    """An account naming a faculty id that doesn't exist isn't a small
+    inconsistency: that person signs in, lands on their deck, and sees an empty
+    queue forever with nothing to say why."""
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+    client.post("/signup", data={"username": "newprof", "password": "pw1234",
+                                 "confirm": "pw1234"})
+    client.post("/login", data={"username": "maya", "password": "pw"})
+
+    r = client.post("/accounts/approve",
+                    data={"username": "newprof", "role": "professor",
+                          "professor": "nobody-by-that-name"},
+                    follow_redirects=True)
+    assert b"No professor with id" in r.data
+    assert next(u for u in usersmod.load_users()
+                if u["username"] == "newprof")["role"] == usersmod.PENDING
+
+    # the real one works
+    client.post("/accounts/approve", data={"username": "newprof",
+                                           "role": "professor",
+                                           "professor": "fan-zhiwen"})
+    row = next(u for u in usersmod.load_users() if u["username"] == "newprof")
+    assert row["role"] == "professor" and row["professor"] == "fan-zhiwen"
+
+
+def test_no_faculty_means_no_professor_account(tmp_path, monkeypatch):
+    """What the advisor is told to do when the faculty list is empty."""
+    from src import triage as triagemod
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+    triagemod.save_professors([], triagemod.PROFESSORS_YAML)   # nobody on file
+
+    client.post("/signup", data={"username": "newprof", "password": "pw1234",
+                                 "confirm": "pw1234"})
+    client.post("/login", data={"username": "maya", "password": "pw"})
+
+    r = client.post("/accounts/approve",
+                    data={"username": "newprof", "role": "professor",
+                          "professor": "gratz-paul"}, follow_redirects=True)
+    assert b"no professors on the faculty list" in r.data.lower()
+    assert next(u for u in usersmod.load_users()
+                if u["username"] == "newprof")["role"] == usersmod.PENDING
+
+    # the page says so rather than offering an empty dropdown
+    page = client.get("/accounts").get_data(as_text=True)
+    assert "No faculty on file" in page
+
+    # an advisor account is still fine — it needs no faculty entry
+    client.post("/accounts/approve", data={"username": "newprof", "role": "advisor"})
+    assert next(u for u in usersmod.load_users()
+                if u["username"] == "newprof")["role"] == "advisor"
+
+
+def test_the_cli_and_the_web_agree_about_faculty(tmp_path, monkeypatch):
+    """The check used to live only in the CLI, which is how the web route came
+    to accept a made-up id. One implementation, one answer."""
+    from src import triage as triagemod
+    from src import users as usersmod
+    triagemod.save_professors([{"id": "gratz-paul", "name": "Paul Gratz"}],
+                              triagemod.PROFESSORS_YAML)
+    def refuses(fn, *a):
+        try:
+            fn(*a)
+        except usersmod.UserError:
+            return True
+        raise AssertionError(f"{a[-1]!r} was accepted as a faculty id")
+
+    for bad in ("", "not-a-real-id"):
+        assert refuses(usersmod.add_user, [], "x", "pw1234", usersmod.PROFESSOR, bad)
+        assert refuses(usersmod.approve_user,
+                       usersmod.request_account([], "y", "pw1234"), "y",
+                       usersmod.PROFESSOR, bad)
+    assert usersmod.add_user([], "x", "pw1234", usersmod.PROFESSOR, "gratz-paul")
 
 
 def test_signup_does_not_leak_who_already_has_an_account(tmp_path, monkeypatch):
