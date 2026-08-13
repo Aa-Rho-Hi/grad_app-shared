@@ -1,0 +1,16 @@
+# Extra dependencies for running this on a server. Deliberately NOT in
+# requirements.txt: a laptop never needs them, and psycopg2 is the kind of
+# package that wants Postgres headers and can fail to build — which would turn
+# "install the app" into a compiler problem for someone who only wants to run
+# it locally on SQLite.
+#
+# Both are imported lazily (src/store.py loads psycopg2 only when
+# GRADAPP_DATABASE_URL points at Postgres), so a local checkout without these
+# installed behaves exactly as before.
+#
+#   pip install -r requirements.txt -r requirements-cloud.txt
+
+-r requirements.txt
+
+psycopg2-binary>=2.9   # Cloud SQL; selected by GRADAPP_DATABASE_URL
+gunicorn>=21.2         # production WSGI server — Flask's own is dev-only

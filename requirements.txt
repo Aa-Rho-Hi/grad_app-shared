@@ -5,10 +5,6 @@ openpyxl>=3.1
 PyYAML>=6.0
 Flask>=3.0
 Flask-Limiter>=4.0    # rate limiting on the web UI's upload/reset routes
-# Cloud only. Local runs on SQLite and never imports this; it's loaded lazily
-# so a laptop checkout doesn't need Postgres headers to start.
-psycopg2-binary>=2.9  # Cloud SQL (set GRADAPP_DATABASE_URL to switch)
-gunicorn>=21.2        # production WSGI server; Flask's own is dev-only
 pypdf>=4.0
 python-docx>=1.1
 # OCR for scanned PDFs (optional but recommended). Also needs the Tesseract

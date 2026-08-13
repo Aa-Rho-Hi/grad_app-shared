@@ -93,6 +93,8 @@ def main(n=500, scratch="/tmp/load-scratch"):
 
     os.makedirs(os.path.join(scratch, "raw"), exist_ok=True)
     usersmod.USERS_YAML = os.path.join(scratch, "users.yaml")   # no login for the run
+    from src import triage as triagemod                          # never the real config
+    triagemod.PROFESSORS_YAML = os.path.join(scratch, "professors.yaml")
     appmod.DATA = scratch
     appmod.app.config.update(TESTING=True)
     client = appmod.app.test_client()

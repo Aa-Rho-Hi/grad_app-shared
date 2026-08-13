@@ -38,7 +38,12 @@ def section(t):
 def client(tmp, testing=True):
     from src import app as appmod
     from src import users as usersmod
-    usersmod.USERS_YAML = os.path.join(tmp, "users.yaml")   # never the real one
+    # Never the real ones. This file's own probes are what taught us why: the
+    # XSS and YAML-injection payloads below were landing in the developer's
+    # live config/professors.yaml and appearing on the real dashboard.
+    from src import triage as triagemod
+    usersmod.USERS_YAML = os.path.join(tmp, "users.yaml")
+    triagemod.PROFESSORS_YAML = os.path.join(tmp, "professors.yaml")
     appmod.DATA = tmp
     os.makedirs(os.path.join(tmp, "raw"), exist_ok=True)
     appmod.app.config.update(TESTING=testing)

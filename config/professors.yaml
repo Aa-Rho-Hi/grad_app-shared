@@ -19,10 +19,3 @@ professors:
 - id: narayanan-krishna
   name: Krishna Narayanan
   url: https://engineering.tamu.edu/electrical/profiles/knarayanan.html
-- id: img-src-x-onerror-alert-1
-  name: <img src=x onerror=alert(1)>
-  url: https://x.test/p
-- id: anchor-a-x-1-comment
-  name: '*anchor: &a [{''x'': 1}]
-
-    #comment'
