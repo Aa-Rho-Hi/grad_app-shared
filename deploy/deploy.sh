@@ -279,6 +279,11 @@ fi
 # project, which is far more useful than a stack trace.
 NEEDS_ADMIN=()
 
+# Naming an existing account means "this one already has what it needs", so
+# every grant below is skipped rather than attempted and failed. Without this
+# the escape hatch hits exactly the wall it exists to get around.
+BYO_SA="${SERVICE_ACCOUNT:-}"
+
 grant_project() {   # role
   gcloud projects add-iam-policy-binding "$PROJECT" \
     --member="serviceAccount:$SA_EMAIL" --role="$1" --condition=None >/dev/null 2>&1 \
@@ -289,11 +294,13 @@ grant_project() {   # role
 
 # Bucket and secrets take resource-level bindings, and you can set those on
 # things you created — no project-wide rights involved.
-gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
-  --member="serviceAccount:$SA_EMAIL" --role=roles/storage.objectAdmin >/dev/null 2>&1 \
-  || grant_project roles/storage.objectAdmin
+if [ -z "$BYO_SA" ]; then
+  gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
+    --member="serviceAccount:$SA_EMAIL" --role=roles/storage.objectAdmin >/dev/null 2>&1 \
+    || grant_project roles/storage.objectAdmin
+fi
 
-for secret in "${NAME}-db-url" "${NAME}-secret-key" "${NAME}-setup-token"; do
+for secret in $([ -z "$BYO_SA" ] && echo "${NAME}-db-url ${NAME}-secret-key ${NAME}-setup-token"); do
   gcloud secrets add-iam-policy-binding "$secret" \
     --member="serviceAccount:$SA_EMAIL" --role=roles/secretmanager.secretAccessor \
     >/dev/null 2>&1 || NEEDS_ADMIN+=("gcloud secrets add-iam-policy-binding $secret \\
@@ -302,7 +309,7 @@ for secret in "${NAME}-db-url" "${NAME}-secret-key" "${NAME}-setup-token"; do
 done
 
 # Cloud SQL has no per-instance IAM, so this one is project-level or nothing.
-grant_project roles/cloudsql.client
+[ -z "$BYO_SA" ] && grant_project roles/cloudsql.client || true
 
 # --------------------------------------------------------------------------
 # The ingest queue. Without this an upload is processed on the instance that
@@ -327,17 +334,36 @@ TASKS_SA="${NAME}-tasks"
 TASKS_EMAIL="${TASKS_SA}@${PROJECT}.iam.gserviceaccount.com"
 gcloud iam service-accounts describe "$TASKS_EMAIL" >/dev/null 2>&1 || \
   gcloud iam service-accounts create "$TASKS_SA" --display-name="Grad app (Cloud Tasks caller)"
-# Per-queue rather than project-wide where the API allows it.
-gcloud tasks queues add-iam-policy-binding "$QUEUE_NAME" --location="$REGION" \
-  --member="serviceAccount:$SA_EMAIL" --role=roles/cloudtasks.enqueuer >/dev/null 2>&1 \
-  || grant_project roles/cloudtasks.enqueuer
+# The queue is a durability upgrade, not a requirement: without it the app
+# ingests on a request thread, exactly as it did before the queue existed. So
+# these two grants degrade rather than block — a pilot that works today beats a
+# perfect one that waits on a ticket.
+QUEUE_READY=1
+if [ -n "$BYO_SA" ]; then
+  : # a supplied account is assumed to hold these already
+else
+  gcloud tasks queues add-iam-policy-binding "$QUEUE_NAME" --location="$REGION" \
+    --member="serviceAccount:$SA_EMAIL" --role=roles/cloudtasks.enqueuer \
+    >/dev/null 2>&1 || QUEUE_READY=0
+  gcloud iam service-accounts add-iam-policy-binding "$TASKS_EMAIL" \
+    --member="serviceAccount:$SA_EMAIL" --role=roles/iam.serviceAccountTokenCreator \
+    >/dev/null 2>&1 || QUEUE_READY=0
+fi
+if [ "$QUEUE_READY" = 0 ]; then
+  QUEUE_NOTE="Queued ingest is OFF — the grants for it were refused. Uploads are
+processed on the request thread, which is how this worked before the queue
+existed. If a deploy or scale-down lands mid-upload the rest of that batch is
+lost and has to be re-uploaded; nothing already read is lost. To turn it on:
 
-# Binding on the service account itself, so creating it is enough to grant it.
-gcloud iam service-accounts add-iam-policy-binding "$TASKS_EMAIL" \
-  --member="serviceAccount:$SA_EMAIL" --role=roles/iam.serviceAccountTokenCreator \
-  >/dev/null 2>&1 || NEEDS_ADMIN+=("gcloud iam service-accounts add-iam-policy-binding $TASKS_EMAIL \\
-    --member=serviceAccount:$SA_EMAIL \\
-    --role=roles/iam.serviceAccountTokenCreator")
+  gcloud tasks queues add-iam-policy-binding $QUEUE_NAME --location=$REGION \\
+    --member=serviceAccount:$SA_EMAIL --role=roles/cloudtasks.enqueuer
+  gcloud iam service-accounts add-iam-policy-binding $TASKS_EMAIL \\
+    --member=serviceAccount:$SA_EMAIL --role=roles/iam.serviceAccountTokenCreator
+
+then re-run this script."
+else
+  QUEUE_NOTE=""
+fi
 
 # Stop here rather than deploying something that cannot start. Without
 # cloudsql.client the container comes up, fails to reach the database, and
@@ -407,16 +433,14 @@ URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='valu
 # Chicken and egg: a queued task calls the service back, so it needs the URL,
 # which doesn't exist until the first deploy. Set it on a second pass. On every
 # later run these are already correct and this is a no-op revision.
-say "Pointing the queue at $URL"
-gcloud run services update "$SERVICE" --region "$REGION" \
-  --update-env-vars "GRADAPP_TASK_QUEUE=${QUEUE_PATH},GRADAPP_BASE_URL=${URL},GRADAPP_TASK_INVOKER=${TASKS_EMAIL}" \
-  >/dev/null
-
-# Only the Cloud Tasks caller may reach /tasks/run. The service is otherwise
-# public (it has its own login), so this is belt and braces on the one endpoint
-# that runs ingest without a session.
-gcloud run services add-iam-policy-binding "$SERVICE" --region "$REGION" \
-  --member="serviceAccount:$TASKS_EMAIL" --role=roles/run.invoker >/dev/null
+if [ "$QUEUE_READY" = 1 ]; then
+  say "Pointing the queue at $URL"
+  gcloud run services update "$SERVICE" --region "$REGION" \
+    --update-env-vars "GRADAPP_TASK_QUEUE=${QUEUE_PATH},GRADAPP_BASE_URL=${URL},GRADAPP_TASK_INVOKER=${TASKS_EMAIL}" \
+    >/dev/null
+  gcloud run services add-iam-policy-binding "$SERVICE" --region "$REGION" \
+    --member="serviceAccount:$TASKS_EMAIL" --role=roles/run.invoker >/dev/null 2>&1 || true
+fi
 
 cat <<EOF
 
@@ -435,9 +459,9 @@ Once the advisor account exists, remove it so the link can't be reused:
     gcloud run services update $SERVICE --region $REGION \\
       --remove-secrets GRADAPP_SETUP_TOKEN
 
-Uploads are queued: each file becomes a Cloud Task, so a deploy or a
+${QUEUE_NOTE:-Uploads are queued: each file becomes a Cloud Task, so a deploy or a
 scale-down part-way through a batch no longer loses the rest of it — the queue
-redelivers whatever didn't finish.
+redelivers whatever did not finish.}
 
 --allow-unauthenticated puts this on the public internet behind the app's own
 login. If the applicant-data conversation hasn't landed yet, drop that flag and
