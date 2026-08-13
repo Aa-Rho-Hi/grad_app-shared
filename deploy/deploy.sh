@@ -77,6 +77,21 @@ gcloud sql users describe "$DB_USER" --instance="$DB_INSTANCE" >/dev/null 2>&1 \
   && gcloud sql users set-password "$DB_USER" --instance="$DB_INSTANCE" --password="$DB_PASSWORD" \
   || gcloud sql users create "$DB_USER" --instance="$DB_INSTANCE" --password="$DB_PASSWORD"
 
+# The connection string contains the password, so it goes in Secret Manager
+# rather than in --set-env-vars. Env vars are shown in plain text on the Cloud
+# Run service page and in `gcloud run services describe`, which means anyone
+# with Viewer on the project could read the database credentials for a system
+# holding applicant records.
+CONNECTION="${PROJECT}:${REGION}:${DB_INSTANCE}"
+DSN="postgresql://${DB_USER}:${DB_PASSWORD}@/${DB_NAME}?host=/cloudsql/${CONNECTION}"
+if gcloud secrets describe grad-app-db-url >/dev/null 2>&1; then
+  printf '%s' "$DSN" | gcloud secrets versions add grad-app-db-url --data-file=- >/dev/null
+else
+  printf '%s' "$DSN" | gcloud secrets create grad-app-db-url --data-file=- \
+    --replication-policy=automatic
+fi
+unset DB_PASSWORD DSN
+
 # --------------------------------------------------------------------------
 # Bucket. Uniform access + public access prevention: this holds applicants'
 # original PDFs, so the failure mode of a misconfigured ACL is somebody's
@@ -107,7 +122,6 @@ gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
 # --------------------------------------------------------------------------
 # Build and deploy.
 # --------------------------------------------------------------------------
-CONNECTION="${PROJECT}:${REGION}:${DB_INSTANCE}"
 say "Building the image"
 gcloud builds submit --tag "gcr.io/${PROJECT}/${SERVICE}"
 
@@ -120,7 +134,7 @@ gcloud run deploy "$SERVICE" \
   --set-env-vars "GRADAPP_ENV=cloud,GRADAPP_BUCKET=${BUCKET},GRADAPP_DATA=/tmp/gradapp-data" \
   --set-env-vars "GRADAPP_USERS_FILE=/tmp/gradapp-data/config/users.yaml" \
   --set-env-vars "GRADAPP_PROFESSORS_FILE=/tmp/gradapp-data/config/professors.yaml" \
-  --set-env-vars "GRADAPP_DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@/${DB_NAME}?host=/cloudsql/${CONNECTION}" \
+  --set-secrets "GRADAPP_DATABASE_URL=grad-app-db-url:latest" \
   --set-secrets "GRADAPP_SECRET_KEY=grad-app-secret-key:latest,GRADAPP_SETUP_TOKEN=grad-app-setup-token:latest" \
   --memory 2Gi --cpu 2 --timeout 900 \
   --min-instances 0 --max-instances 4 \
@@ -142,7 +156,7 @@ once to create the advisor account:
 Then, so the link can't be reused:
 
     gcloud run services update $SERVICE --region $REGION \\
-      --remove-env-vars GRADAPP_SETUP_TOKEN
+      --remove-secrets GRADAPP_SETUP_TOKEN
 
 --allow-unauthenticated puts this on the public internet behind the app's own
 login. If the applicant-data conversation hasn't landed yet, drop that flag and
