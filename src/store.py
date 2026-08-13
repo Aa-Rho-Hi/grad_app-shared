@@ -652,6 +652,29 @@ class Store:
         finally:
             conn.close()
 
+    def update_job(self, job_id: str,
+                   mutate: Callable[[Optional[Dict[str, Any]]], Dict[str, Any]]
+                   ) -> Dict[str, Any]:
+        """Atomic read-modify-write of one job's state.
+
+        Needed because with a queue the units of a job finish on whatever
+        instances happen to pick them up, and each one increments the same
+        counter. Two workers finishing at the same moment would otherwise both
+        read 4, both write 5, and the job would never reach its total — a
+        progress bar stuck one short of done, forever.
+        """
+        with self._writing() as conn:
+            row = conn.execute("SELECT state FROM jobs WHERE id=?",
+                               (job_id,)).fetchone()
+            current = json.loads(row["state"]) if row else None
+            updated = mutate(current)
+            conn.execute(
+                "INSERT INTO jobs(id, state, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                " state=excluded.state, updated_at=excluded.updated_at",
+                (job_id, json.dumps(updated, ensure_ascii=False), _now()))
+            return updated
+
     def prune_jobs(self, keep: int = 200) -> None:
         """Bounded, so a long-lived server doesn't accumulate them forever."""
         with self._writing() as conn:

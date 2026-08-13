@@ -176,6 +176,66 @@ def get(job_id: str) -> Optional[Dict[str, Any]]:
     return job
 
 
+# --------------------------------------------------------------------------
+# Fan-out jobs: one job, several units, each finished by whichever instance
+# picked it up. Used when the work is queued rather than run in a thread.
+# --------------------------------------------------------------------------
+
+def open_fanout(total: int, label: str, next_url: str = "",
+                notes: Optional[list] = None) -> str:
+    """Register a job whose units will be completed elsewhere."""
+    job_id = uuid.uuid4().hex[:12]
+    state = {"id": job_id, "started": _now(), "heartbeat": _now(), "done": False,
+             "label": label, "done_count": 0, "total": total,
+             "result": None, "error": None, "messages": list(notes or []),
+             "fanout": True}
+    with _LOCK:
+        _JOBS[job_id] = dict(state)
+    _persist(state)
+    return job_id
+
+
+def finish_unit(job_id: str, message: str = "", next_url: str = "") -> Optional[Dict[str, Any]]:
+    """Record one unit of a fan-out job as done. Returns the new state.
+
+    Goes through the store's atomic read-modify-write, because units finish on
+    whatever instances the queue hands them to. Two workers finishing at the
+    same instant would otherwise both read the same counter and both write the
+    same value, leaving the job permanently one short of its total.
+    """
+    store = _shared()
+
+    def bump(state):
+        state = state or {"id": job_id, "started": _now(), "done_count": 0,
+                          "total": 1, "messages": [], "fanout": True}
+        state["done_count"] = int(state.get("done_count") or 0) + 1
+        state["heartbeat"] = _now()
+        if message:
+            state.setdefault("messages", []).append(message)
+        if state["done_count"] >= int(state.get("total") or 0):
+            state["done"] = True
+            state["label"] = "Done"
+            state["result"] = {"message": " ".join(state.get("messages") or []),
+                               "next": next_url or state.get("next_url") or ""}
+        else:
+            state["label"] = f"Read {state['done_count']} of {state['total']}"
+        return state
+
+    if store is None:                      # no shared store: local dict only
+        with _LOCK:
+            current = _JOBS.get(job_id)
+            updated = bump(dict(current) if current else None)
+            _JOBS[job_id] = updated
+        return updated
+    try:
+        updated = store.update_job(job_id, bump)
+    except Exception:
+        return None
+    with _LOCK:                            # keep this instance's view fresh too
+        _JOBS[job_id] = dict(updated)
+    return updated
+
+
 def _reset_for_tests() -> None:
     with _LOCK:
         _JOBS.clear()

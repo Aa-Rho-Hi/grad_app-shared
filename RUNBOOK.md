@@ -197,6 +197,7 @@ exactly one place so local behaviour can't drift:
 | `GRADAPP_DATABASE_URL` | SQLite file | Cloud SQL Postgres |
 | `GRADAPP_BUCKET` | plain directory | files mirrored to Cloud Storage |
 | `GRADAPP_DATA` | `./data` | `/tmp` (ephemeral, and that's fine) |
+| `GRADAPP_TASK_QUEUE` | unset — ingest runs on a thread | Cloud Tasks queue; ingest is queued per file |
 
 ### What had to change, and why none of it shows up locally
 
@@ -219,14 +220,35 @@ than after.
   nothing, and leave the bar at zero while the upload is in fact working. State
   is mirrored to a `jobs` table and reads fall back to it.
 
+- **Ingest itself.** An upload used to start a thread and return, so a deploy
+  or a scale-down part-way through a batch lost the rest of it. In cloud mode
+  each uploaded file becomes a **Cloud Task**; the queue holds it until a 2xx
+  comes back and redelivers otherwise, so the work survives the instance that
+  started it. Three things make that safe:
+
+  - the file is in the bucket before anything is queued, so any instance can read it;
+  - **one task per file**, not per upload — a batch of forty scanned packets as
+    one task would sit near the dispatch deadline and lose all of it on a retry;
+  - ingest is idempotent (records merge by `cas_id`, sources are replaced per
+    source file), so a redelivery converges instead of duplicating.
+
+  `/tasks/run` is the worker. It has no session — Cloud Tasks authenticates with
+  an OIDC token that the route verifies — so it 404s when no queue is configured
+  and the app refuses to boot if a queue is set without an invoker account.
+  Status codes are the contract: 5xx asks for redelivery, 2xx retires the task,
+  which is why an unparseable packet returns 2xx and records the filename
+  against the job rather than being redelivered until the deadline.
+
 ### What it still doesn't do
 
-The ingest **thread** still runs on whichever instance received the upload. If
-that instance is recycled mid-ingest the work stops; the poller notices the
-heartbeat has gone stale and says so rather than spinning forever, and whatever
-was already read is saved because ingest writes as it goes. A real queue (Cloud
-Tasks, or a worker service) is the fix, and is worth doing if ingests get long
-enough for it to matter.
+A task that is *running* when its instance dies is redelivered from the start of
+that file, so a half-OCR'd 60-page packet is read again rather than resumed.
+Fine at this size; it would matter if single packets got much larger.
+
+Job counters are incremented through `Store.update_job`, an atomic
+read-modify-write — units finish on whatever instances the queue picks, and
+without the transaction two simultaneous finishes would both read the same
+counter and write the same value, leaving a job permanently one short.
 
 ### Cost, and the seasonal trap
 

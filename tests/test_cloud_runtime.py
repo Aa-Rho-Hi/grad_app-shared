@@ -292,6 +292,144 @@ def test_the_local_copy_wins_while_the_job_is_running(shared_store):
     assert seen["label"] == "fresher" and seen["done_count"] == 7
 
 
+# --------------------------------------------------------------------------
+# The queue
+# --------------------------------------------------------------------------
+
+def test_units_finishing_on_different_instances_all_count(shared_store):
+    """The counter is incremented by whichever instance the queue handed each
+    unit to. Read-modify-write without a transaction would let two simultaneous
+    finishes both read 4 and both write 5 — a job stuck one short, forever."""
+    import threading
+
+    job_id = jobs.open_fanout(20, "Queued", "/step/2")
+    barrier = threading.Barrier(20)
+
+    def finish(i):
+        barrier.wait()                       # all land at once
+        jobs.finish_unit(job_id, f"file {i} ok", "/step/2")
+
+    threads = [threading.Thread(target=finish, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    state = jobs.get(job_id)
+    assert state["done_count"] == 20, f"lost updates: {state['done_count']}/20"
+    assert state["done"] is True
+    assert len(state["messages"]) == 20
+
+
+def test_a_job_only_finishes_when_every_unit_does(shared_store):
+    job_id = jobs.open_fanout(3, "Queued", "/step/2")
+    for _ in range(2):
+        jobs.finish_unit(job_id, "ok", "/step/2")
+    mid = jobs.get(job_id)
+    assert mid["done"] is False and "2 of 3" in mid["label"]
+
+    final = jobs.finish_unit(job_id, "ok", "/step/2")
+    assert final["done"] is True
+    assert final["result"]["next"] == "/step/2"
+
+
+def test_the_worker_endpoint_is_shut_when_no_queue_is_configured(tmp_path, monkeypatch):
+    """It writes to the database and has no session behind it, so an
+    unconfigured deployment must not leave it hanging open."""
+    from src import app as appmod
+    from src import taskq
+    monkeypatch.setattr(appmod, "DATA", str(tmp_path))
+    monkeypatch.setattr(taskq, "QUEUE", "")
+    monkeypatch.setattr(taskq, "BASE_URL", "")
+    appmod.app.config.update(TESTING=True)
+    client = appmod.app.test_client()
+    r = client.post("/tasks/run", json={"kind": "roster", "path": "/etc/passwd"})
+    assert r.status_code == 404
+
+
+def test_the_worker_endpoint_refuses_an_unsigned_call(tmp_path, monkeypatch):
+    from src import app as appmod
+    from src import taskq
+    monkeypatch.setattr(appmod, "DATA", str(tmp_path))
+    monkeypatch.setattr(taskq, "QUEUE", "projects/p/locations/l/queues/q")
+    monkeypatch.setattr(taskq, "BASE_URL", "https://example.test")
+    monkeypatch.setattr(taskq, "INVOKER", "tasks@example.iam.gserviceaccount.com")
+    appmod.app.config.update(TESTING=True)
+    client = appmod.app.test_client()
+
+    for headers in ({}, {"Authorization": "Bearer nonsense"},
+                    {"Authorization": "Basic abc"}):
+        r = client.post("/tasks/run", json={"kind": "roster", "path": "x"},
+                        headers=headers)
+        assert r.status_code == 403, f"{headers} got {r.status_code}"
+
+
+def test_a_broken_file_is_retried_then_given_up_on(tmp_path, monkeypatch):
+    """5xx means redeliver, 2xx means done. A packet that can't be parsed will
+    fail identically forever, so it has to stop asking for redelivery — with the
+    filename recorded against the job so the reviewer knows which one."""
+    from src import app as appmod
+    from src import taskq
+    monkeypatch.setattr(appmod, "DATA", str(tmp_path))
+    monkeypatch.setattr(taskq, "QUEUE", "projects/p/locations/l/queues/q")
+    monkeypatch.setattr(taskq, "BASE_URL", "https://example.test")
+    monkeypatch.setattr(taskq, "INVOKER", "")          # no OIDC to verify here
+    appmod.app.config.update(TESTING=True)
+    client = appmod.app.test_client()
+
+    store = Store(db_path_for(str(tmp_path)))
+    jobs.use_store(lambda: store)
+    jobs._reset_for_tests()
+    job_id = jobs.open_fanout(1, "Queued", "/step/2")
+
+    body = {"kind": "packet", "path": str(tmp_path / "raw" / "gone.pdf"),
+            "job": job_id, "next": "/step/2"}
+
+    first = client.post("/tasks/run", json=body)
+    assert first.status_code == 503, "a first failure should be redelivered"
+    assert jobs.get(job_id)["done_count"] == 0
+
+    last = client.post("/tasks/run", json=body,
+                       headers={"X-CloudTasks-TaskRetryCount": "2"})
+    assert last.status_code == 200, "it would be redelivered forever"
+    state = jobs.get(job_id)
+    assert state["done"] is True
+    assert "gone.pdf" in " ".join(state["messages"])
+    jobs.use_store(None)
+    jobs._reset_for_tests()
+
+
+def test_reingesting_the_same_roster_is_idempotent(tmp_path, monkeypatch):
+    """Retries mean a file can be read twice. That has to converge, or a
+    redelivery silently doubles the roster."""
+    from src.run import run as run_pipeline
+
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "fixtures", "sample_applications.csv")
+    run_pipeline(fixture, str(tmp_path),
+                 os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "config", "csv_field_map.yaml"))
+    store = Store(db_path_for(str(tmp_path)))
+    first = store.count()
+    first_ids = {e["cas_id"] for e in store.index()}
+    assert first
+
+    run_pipeline(fixture, str(tmp_path),
+                 os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "config", "csv_field_map.yaml"))
+    assert store.count() == first, "a redelivered roster duplicated applicants"
+    assert {e["cas_id"] for e in store.index()} == first_ids
+
+
+def test_local_uploads_do_not_go_near_the_queue(tmp_path, monkeypatch):
+    """A laptop keeps the thread. No queue, no callback URL, nothing to fail."""
+    from src import taskq
+    monkeypatch.setattr(taskq, "QUEUE", "")
+    monkeypatch.setattr(taskq, "BASE_URL", "")
+    assert taskq.enabled() is False
+    assert taskq.enqueue({"kind": "roster", "path": "x"}) is False
+
+
 def test_jobs_are_pruned(shared_store):
     for i in range(12):
         shared_store.put_job(f"j{i}", json.dumps({"id": f"j{i}", "done": True}))

@@ -65,6 +65,7 @@ from .triage import (PROF_DECISIONS, SWIPES, ProfessorError, add_professor,
                      professor_by_id, professor_deck, queues, remove_professor,
                      save_professors, shortlisted, update_professor)
 from .status_report import write_status_report
+from . import taskq
 from .storage import blobs_for, use_for_config
 from .store import Store, db_path_for
 from .users import (ADVISOR, PENDING, PROFESSOR, UserError, add_user,
@@ -293,6 +294,10 @@ def _csrf_protect():
     same-origin check above still applies even then."""
     if request.method != "POST" or app.testing:
         return None
+    if request.endpoint == "task_run":
+        # Cloud Tasks has no session and no form; its OIDC token is the
+        # authentication, checked in the route itself.
+        return None
     sent = request.form.get("csrf_token", "")
     expected = session.get("_csrf_token", "")
     if not expected or not secrets.compare_digest(sent, expected):
@@ -335,7 +340,8 @@ def _access_log(response: Response) -> Response:
 # accounts, every page needs a session and the role decides what you can reach.
 
 # Endpoints reachable without a session, so the login page itself can render.
-_OPEN_ENDPOINTS = {"login", "logout", "setup", "signup", "static"}
+_OPEN_ENDPOINTS = {"login", "logout", "setup", "signup", "static",
+                   "task_run"}
 
 # Four is fine on a laptop -- a demo needs a password someone can type off a
 # slide, and the real protection there is that the app refuses to bind beyond
@@ -359,6 +365,13 @@ if IS_CLOUD and not _SETUP_TOKEN and not login_required_globally():
         "serve applicant data with no login. Set GRADAPP_SETUP_TOKEN to a "
         "random string, open /setup?token=<it> once to create the advisor "
         "account, then remove the variable.")
+
+
+if IS_CLOUD and taskq.QUEUE and not taskq.INVOKER:
+    raise SystemExit(
+        "GRADAPP_TASK_QUEUE is set but GRADAPP_TASK_INVOKER is not, so "
+        "/tasks/run would accept anything that finds it. Set the invoker "
+        "service account Cloud Tasks signs callbacks with.")
 
 
 def _setup_token_ok() -> bool:
@@ -997,6 +1010,9 @@ def process():
         return {"message": message, "next": next_url}
 
     if _wants_json():
+        queued = _queue_ingest(csv_path, saved_packets, refused, next_url)
+        if queued:
+            return {"job": queued}
         return {"job": jobs.start(work, "Starting")}
 
     result = work(jobs.Progress("sync"))          # no JS: do it inline as before
@@ -1096,6 +1112,104 @@ def _ingest_staged_packets(paths, progress=None) -> str:
             app.logger.exception("Error processing loose packet PDFs")
             notes.append(f"Loose PDFs: {exc}")
     return " ".join([_packet_report(totals)] + notes)
+
+
+def _queue_ingest(csv_path, packet_paths, refused, next_url) -> str:
+    """Hand each uploaded file to the queue. Returns a job id, or "" if there
+    is no queue and the caller should run the work itself.
+
+    One task per file rather than one per upload: a batch of forty scanned
+    packets as a single task would sit near the dispatch deadline and lose all
+    of it on a redelivery, whereas per file a retry repeats one packet.
+    """
+    if not taskq.enabled():
+        return ""
+    units = ([{"kind": "roster", "path": csv_path}] if csv_path else [])
+    for path in packet_paths:
+        units.append({"kind": "zip" if path.lower().endswith(".zip") else "packet",
+                      "path": path})
+    if not units:
+        return ""
+
+    notes = ([f"Refused (contents don't match the extension): {', '.join(refused)}."]
+             if refused else [])
+    job_id = jobs.open_fanout(len(units), "Queued", next_url, notes)
+
+    sent = 0
+    for unit in units:
+        if taskq.enqueue({**unit, "job": job_id, "next": next_url}):
+            sent += 1
+    if sent < len(units):
+        # Partially enqueued: better to run the whole thing in-thread than to
+        # leave a job that can never reach its total.
+        app.logger.error("Only %s of %s tasks enqueued; falling back", sent, len(units))
+        return ""
+    return job_id
+
+
+def _ingest_one(unit: Dict[str, Any]) -> str:
+    """Do one queued unit of work. Must be safe to run twice.
+
+    Retries are the point of the queue, so this gets called again whenever a
+    worker dies mid-file or returns 5xx. That's safe because records merge by
+    cas_id and a source is replaced per originating file, so re-reading a packet
+    converges on the same record instead of duplicating anything.
+    """
+    kind, path = unit.get("kind"), unit.get("path", "")
+    # The file was uploaded to some other instance; fetch it before reading.
+    if path and not _blobs().ensure(path):
+        raise FileNotFoundError(f"{os.path.basename(path)} is no longer available")
+
+    if kind == "roster":
+        s = run(path, DATA, FIELD_MAP)
+        return (f"Application data: {s['valid']} summarized, "
+                f"{s['quarantined']} quarantined.")
+    if kind == "zip":
+        return _packet_report(ingest_zip(path, DATA))
+    if kind == "packet":
+        # ingest_packet_folder works on a directory; give it one holding just
+        # this file so a retry re-reads one packet rather than the whole batch.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            link = os.path.join(tmp, os.path.basename(path))
+            os.symlink(os.path.abspath(path), link)
+            return _packet_report(ingest_packet_folder(tmp, DATA))
+    raise ValueError(f"Unknown task kind {kind!r}")
+
+
+@app.route("/tasks/run", methods=["POST"])
+def task_run():
+    """Cloud Tasks calls this. Never a browser.
+
+    Status codes are the contract with the queue, so they're chosen carefully:
+    a 5xx means "redeliver this", a 2xx means "done with it". A packet we can't
+    parse must therefore return 2xx — it will fail identically forever, and
+    redelivering it would occupy the queue until the deadline while the
+    reviewer waits for a job that can never complete.
+    """
+    # Fails closed: with no queue configured this endpoint does nothing and
+    # shouldn't exist. Otherwise an unconfigured deployment would expose an
+    # unauthenticated route that writes to the database.
+    if not taskq.enabled():
+        abort(404)
+    if not taskq.verify_oidc(request.headers.get("Authorization")):
+        abort(403)
+    unit = request.get_json(silent=True) or {}
+    job_id = unit.get("job", "")
+    try:
+        message = _ingest_one(unit)
+    except Exception as exc:                       # noqa: BLE001
+        app.logger.exception("Queued ingest unit failed")
+        name = os.path.basename(unit.get("path", "")) or "a file"
+        # Ask for one redelivery on a transient-looking failure, then give up
+        # and record it against the job so the reviewer sees which file.
+        if int(request.headers.get("X-CloudTasks-TaskRetryCount", "0")) < 2:
+            return {"error": str(exc)}, 503
+        jobs.finish_unit(job_id, f"{name}: {exc}", unit.get("next", ""))
+        return {"error": str(exc), "gave_up": True}, 200
+
+    jobs.finish_unit(job_id, message, unit.get("next", ""))
+    return {"ok": True, "message": message}, 200
 
 
 @app.route("/upload_zip", methods=["POST"])

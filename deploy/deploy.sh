@@ -38,7 +38,8 @@ gcloud config set project "$PROJECT" >/dev/null
 say "Enabling the APIs this needs"
 gcloud services enable \
   run.googleapis.com sqladmin.googleapis.com storage.googleapis.com \
-  secretmanager.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
+  secretmanager.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
+  cloudtasks.googleapis.com
 
 # --------------------------------------------------------------------------
 # Postgres. db-f1-micro has no SLA and is meant for low traffic — right for a
@@ -120,6 +121,35 @@ gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
   --member="serviceAccount:$SA_EMAIL" --role=roles/storage.objectAdmin >/dev/null
 
 # --------------------------------------------------------------------------
+# The ingest queue. Without this an upload is processed on the instance that
+# received it, and a deploy or scale-down mid-ingest loses the rest of the
+# batch. Cloud Tasks holds each file until a 2xx comes back.
+# --------------------------------------------------------------------------
+QUEUE_NAME=grad-app-ingest
+if ! gcloud tasks queues describe "$QUEUE_NAME" --location="$REGION" >/dev/null 2>&1; then
+  say "Creating the ingest queue"
+  # Concurrency is capped low on purpose: every task is an OCR job competing
+  # for the same small database, and letting fifty run at once would be slower
+  # than eight, not faster.
+  gcloud tasks queues create "$QUEUE_NAME" --location="$REGION" \
+    --max-concurrent-dispatches=8 --max-attempts=5 \
+    --min-backoff=10s --max-backoff=300s
+fi
+QUEUE_PATH="projects/${PROJECT}/locations/${REGION}/queues/${QUEUE_NAME}"
+
+# Cloud Tasks signs its callback as this account, and /tasks/run verifies it —
+# the endpoint writes to the database and has no session behind it.
+TASKS_SA="grad-app-tasks"
+TASKS_EMAIL="${TASKS_SA}@${PROJECT}.iam.gserviceaccount.com"
+gcloud iam service-accounts describe "$TASKS_EMAIL" >/dev/null 2>&1 || \
+  gcloud iam service-accounts create "$TASKS_SA" --display-name="Grad app (Cloud Tasks caller)"
+gcloud projects add-iam-policy-binding "$PROJECT" \
+  --member="serviceAccount:$SA_EMAIL" --role=roles/cloudtasks.enqueuer --condition=None >/dev/null
+# The app's own account has to be able to mint tokens as the caller account.
+gcloud iam service-accounts add-iam-policy-binding "$TASKS_EMAIL" \
+  --member="serviceAccount:$SA_EMAIL" --role=roles/iam.serviceAccountTokenCreator >/dev/null
+
+# --------------------------------------------------------------------------
 # Build and deploy.
 # --------------------------------------------------------------------------
 say "Building the image"
@@ -141,6 +171,21 @@ gcloud run deploy "$SERVICE" \
   --allow-unauthenticated
 
 URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
+
+# Chicken and egg: a queued task calls the service back, so it needs the URL,
+# which doesn't exist until the first deploy. Set it on a second pass. On every
+# later run these are already correct and this is a no-op revision.
+say "Pointing the queue at $URL"
+gcloud run services update "$SERVICE" --region "$REGION" \
+  --update-env-vars "GRADAPP_TASK_QUEUE=${QUEUE_PATH},GRADAPP_BASE_URL=${URL},GRADAPP_TASK_INVOKER=${TASKS_EMAIL}" \
+  >/dev/null
+
+# Only the Cloud Tasks caller may reach /tasks/run. The service is otherwise
+# public (it has its own login), so this is belt and braces on the one endpoint
+# that runs ingest without a session.
+gcloud run services add-iam-policy-binding "$SERVICE" --region "$REGION" \
+  --member="serviceAccount:$TASKS_EMAIL" --role=roles/run.invoker >/dev/null
+
 TOKEN="$(gcloud secrets versions access latest --secret=grad-app-setup-token)"
 
 cat <<EOF
@@ -157,6 +202,10 @@ Then, so the link can't be reused:
 
     gcloud run services update $SERVICE --region $REGION \\
       --remove-secrets GRADAPP_SETUP_TOKEN
+
+Uploads are queued: each file becomes a Cloud Task, so a deploy or a
+scale-down part-way through a batch no longer loses the rest of it — the queue
+redelivers whatever didn't finish.
 
 --allow-unauthenticated puts this on the public internet behind the app's own
 login. If the applicant-data conversation hasn't landed yet, drop that flag and

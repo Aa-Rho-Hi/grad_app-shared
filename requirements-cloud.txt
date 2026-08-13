@@ -12,5 +12,8 @@
 
 -r requirements.txt
 
-psycopg2-binary>=2.9   # Cloud SQL; selected by GRADAPP_DATABASE_URL
-gunicorn>=21.2         # production WSGI server — Flask's own is dev-only
+psycopg2-binary>=2.9        # Cloud SQL; selected by GRADAPP_DATABASE_URL
+gunicorn>=21.2              # production WSGI server — Flask's own is dev-only
+google-cloud-storage>=2.14  # uploads and generated files; GRADAPP_BUCKET
+google-cloud-tasks>=2.16    # queued ingest;              GRADAPP_TASK_QUEUE
+google-auth>=2.28           # verifying the OIDC token on /tasks/run
