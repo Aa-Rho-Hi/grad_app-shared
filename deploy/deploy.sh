@@ -184,10 +184,16 @@ gcloud sql databases describe "$DB_NAME" --instance="$DB_INSTANCE" >/dev/null 2>
 # Secrets. Generated here and never printed: the database password and session
 # key exist only in Secret Manager, and the deployer doesn't need to see either.
 # --------------------------------------------------------------------------
+# --replication-policy=user-managed pinned to $REGION, not "automatic".
+# Automatic replication puts the secret in "global", which an organization
+# policy of constraints/gcp.resourceLocations rejects outright — universities
+# commonly set one to keep data in named regions. Naming the location is also
+# just more honest about where this ends up living.
 ensure_secret() {   # name, generator
   if ! gcloud secrets describe "$1" >/dev/null 2>&1; then
     say "Creating secret $1"
-    eval "$2" | gcloud secrets create "$1" --data-file=- --replication-policy=automatic
+    eval "$2" | gcloud secrets create "$1" --data-file=- \
+      --replication-policy=user-managed --locations="$REGION"
   fi
 }
 
@@ -211,7 +217,7 @@ if gcloud secrets describe ${NAME}-db-url >/dev/null 2>&1; then
   printf '%s' "$DSN" | gcloud secrets versions add ${NAME}-db-url --data-file=- >/dev/null
 else
   printf '%s' "$DSN" | gcloud secrets create ${NAME}-db-url --data-file=- \
-    --replication-policy=automatic
+    --replication-policy=user-managed --locations="$REGION"
 fi
 unset DB_PASSWORD DSN
 
@@ -274,12 +280,21 @@ gcloud iam service-accounts add-iam-policy-binding "$TASKS_EMAIL" \
 # --------------------------------------------------------------------------
 # Build and deploy.
 # --------------------------------------------------------------------------
+# gcr.io is multi-regional storage in the US, which the same location policy
+# can refuse. A regional Artifact Registry repo keeps the image where the rest
+# of this lives — and gcr.io is the legacy path anyway.
+REPO="${NAME}-images"
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${SERVICE}"
+gcloud artifacts repositories describe "$REPO" --location="$REGION" >/dev/null 2>&1 || \
+  gcloud artifacts repositories create "$REPO" --repository-format=docker \
+    --location="$REGION" --description="Grad app container images"
+
 say "Building the image"
-gcloud builds submit --tag "gcr.io/${PROJECT}/${SERVICE}"
+gcloud builds submit --tag "$IMAGE" --region="$REGION"
 
 say "Deploying"
 gcloud run deploy "$SERVICE" \
-  --image "gcr.io/${PROJECT}/${SERVICE}" \
+  --image "$IMAGE" \
   --region "$REGION" \
   --service-account "$SA_EMAIL" \
   --add-cloudsql-instances "$CONNECTION" \
