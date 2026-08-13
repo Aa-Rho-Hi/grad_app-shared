@@ -41,6 +41,10 @@ SA="${NAME}-run"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 die() { printf '\n\033[1;31m%s\033[0m\n' "$1" >&2; exit 1; }
 
+# `set -e` makes any unhandled failure exit silently, which in a 200-line deploy
+# script means staring at a prompt with no idea what happened. Report where.
+trap 'printf "\n\033[1;31mdeploy.sh failed at line %s: %s\033[0m\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+
 # --------------------------------------------------------------------------
 # Preflight.
 #
@@ -70,21 +74,41 @@ NEEDED=(
   run.services.create
   cloudtasks.queues.create
 )
+# `|| true`: this probe is advisory, and it fails in its own right on a locked
+# down project — testing your permissions itself needs a permission. Its failure
+# must not take the script down, which is exactly what it did the first time.
 GRANTED="$(gcloud projects test-iam-permissions "$PROJECT" \
   --permissions="$(IFS=,; echo "${NEEDED[*]}")" \
-  --format='value(permissions)' 2>/dev/null | tr ';' '\n' | tr ',' '\n')"
-MISSING=()
-for perm in "${NEEDED[@]}"; do
-  grep -qx "$perm" <<<"$GRANTED" || MISSING+=("$perm")
-done
-if [ ${#MISSING[@]} -gt 0 ]; then
-  die "Your account is missing these permissions on '$PROJECT':
+  --format='value(permissions)' 2>/dev/null | tr ';,' '\n\n' || true)"
+
+if [ -z "$GRANTED" ]; then
+  cat <<EOF
+
+  Couldn't read your permissions on this project — either the probe itself is
+  denied, or the Resource Manager API is off. That's common on a managed
+  departmental project and doesn't necessarily mean the deploy will fail.
+
+  Continuing will find out for real. The first thing to break would be
+  creating the Cloud SQL instance, and nothing is billable before that.
+
+EOF
+else
+  MISSING=()
+  for perm in "${NEEDED[@]}"; do
+    grep -qx "$perm" <<<"$GRANTED" || MISSING+=("$perm")
+  done
+  if [ ${#MISSING[@]} -gt 0 ]; then
+    die "Your account is missing these permissions on '$PROJECT':
 
 $(printf '  %s\n' "${MISSING[@]}")
 
-Ask whoever owns the project for roles/editor plus
-roles/resourcemanager.projectIamAdmin, or for a project of your own.
+Forward exactly that list to whoever administers the project — it's more
+actionable than 'it didn't work'. roles/editor plus
+roles/resourcemanager.projectIamAdmin covers all of them.
+
 Stopping now rather than part-way through."
+  fi
+  say "Permissions look fine"
 fi
 
 # What already exists, so nothing is created by surprise in a shared project.
