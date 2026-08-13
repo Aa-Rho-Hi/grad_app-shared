@@ -90,6 +90,7 @@ NEEDED=(
   cloudsql.instances.create
   storage.buckets.create
   secretmanager.secrets.create
+  secretmanager.versions.add
   run.services.create
   cloudtasks.queues.create
 )
@@ -184,24 +185,45 @@ gcloud sql databases describe "$DB_NAME" --instance="$DB_INSTANCE" >/dev/null 2>
 # Secrets. Generated here and never printed: the database password and session
 # key exist only in Secret Manager, and the deployer doesn't need to see either.
 # --------------------------------------------------------------------------
-# --replication-policy=user-managed pinned to $REGION, not "automatic".
-# Automatic replication puts the secret in "global", which an organization
-# policy of constraints/gcp.resourceLocations rejects outright — universities
-# commonly set one to keep data in named regions. Naming the location is also
-# just more honest about where this ends up living.
-ensure_secret() {   # name, generator
-  if ! gcloud secrets describe "$1" >/dev/null 2>&1; then
+# Two rules here, both learned the hard way against a locked-down project.
+#
+# 1. --replication-policy=user-managed pinned to $REGION, not "automatic".
+#    Automatic replication puts the secret in "global", which an organization
+#    policy of constraints/gcp.resourceLocations rejects outright.
+#
+# 2. **This script never reads a secret back.** Creating secrets and reading
+#    their values are separate permissions, and an account can easily have the
+#    first without the second — writing config is an admin job, reading
+#    production credentials generally isn't. So every value is generated here,
+#    used from a shell variable, and written outward only. The app itself reads
+#    them at runtime through --set-secrets, using its own service account,
+#    which is the only identity that actually needs access.
+
+put_secret() {   # name, value — create it, or add a new version
+  if gcloud secrets describe "$1" >/dev/null 2>&1; then
+    printf '%s' "$2" | gcloud secrets versions add "$1" --data-file=- >/dev/null
+  else
     say "Creating secret $1"
-    eval "$2" | gcloud secrets create "$1" --data-file=- \
-      --replication-policy=user-managed --locations="$REGION"
+    printf '%s' "$2" | gcloud secrets create "$1" --data-file=- \
+      --replication-policy=user-managed --locations="$REGION" >/dev/null
   fi
 }
 
-ensure_secret ${NAME}-db-password "python3 -c 'import secrets;print(secrets.token_urlsafe(32),end=\"\")'"
-ensure_secret ${NAME}-secret-key  "python3 -c 'import secrets;print(secrets.token_hex(32),end=\"\")'"
-ensure_secret ${NAME}-setup-token "python3 -c 'import secrets;print(secrets.token_urlsafe(16),end=\"\")'"
+gen() { python3 -c "import secrets;print(secrets.$1,end='')"; }
 
-DB_PASSWORD="$(gcloud secrets versions access latest --secret=${NAME}-db-password)"
+# The session key must survive redeploys — rotating it signs everyone out — and
+# since we can't read the existing one, it is written exactly once and left
+# alone thereafter. Nothing here ever needs its value.
+if ! gcloud secrets describe "${NAME}-secret-key" >/dev/null 2>&1; then
+  put_secret "${NAME}-secret-key" "$(gen 'token_hex(32)')"
+fi
+
+# The database password is rotated on every deploy instead of being read back.
+# The user's password and the connection string are set from the same variable
+# in the same run, so they can't drift; nothing else holds a copy.
+DB_PASSWORD="$(gen 'token_urlsafe(32)')"
+put_secret "${NAME}-db-password" "$DB_PASSWORD"    # a place a human can find it
+
 gcloud sql users describe "$DB_USER" --instance="$DB_INSTANCE" >/dev/null 2>&1 \
   && gcloud sql users set-password "$DB_USER" --instance="$DB_INSTANCE" --password="$DB_PASSWORD" \
   || gcloud sql users create "$DB_USER" --instance="$DB_INSTANCE" --password="$DB_PASSWORD"
@@ -212,14 +234,16 @@ gcloud sql users describe "$DB_USER" --instance="$DB_INSTANCE" >/dev/null 2>&1 \
 # with Viewer on the project could read the database credentials for a system
 # holding applicant records.
 CONNECTION="${PROJECT}:${REGION}:${DB_INSTANCE}"
-DSN="postgresql://${DB_USER}:${DB_PASSWORD}@/${DB_NAME}?host=/cloudsql/${CONNECTION}"
-if gcloud secrets describe ${NAME}-db-url >/dev/null 2>&1; then
-  printf '%s' "$DSN" | gcloud secrets versions add ${NAME}-db-url --data-file=- >/dev/null
-else
-  printf '%s' "$DSN" | gcloud secrets create ${NAME}-db-url --data-file=- \
-    --replication-policy=user-managed --locations="$REGION"
-fi
-unset DB_PASSWORD DSN
+put_secret "${NAME}-db-url" \
+  "postgresql://${DB_USER}:${DB_PASSWORD}@/${DB_NAME}?host=/cloudsql/${CONNECTION}"
+unset DB_PASSWORD
+
+# Rotated on every deploy rather than created once. It only matters while the
+# app is unclaimed — /setup closes itself the moment an advisor account exists —
+# so a fresh one costs nothing, invalidates any older copy, and is always
+# printable without needing to read it back.
+SETUP_TOKEN="$(gen 'token_urlsafe(16)')"
+put_secret "${NAME}-setup-token" "$SETUP_TOKEN"
 
 # --------------------------------------------------------------------------
 # Bucket. Uniform access + public access prevention: this holds applicants'
@@ -324,19 +348,19 @@ gcloud run services update "$SERVICE" --region "$REGION" \
 gcloud run services add-iam-policy-binding "$SERVICE" --region "$REGION" \
   --member="serviceAccount:$TASKS_EMAIL" --role=roles/run.invoker >/dev/null
 
-TOKEN="$(gcloud secrets versions access latest --secret=${NAME}-setup-token)"
-
 cat <<EOF
 
 Deployed: $URL
 
-The app has no accounts yet, so it is serving nothing at all — every route
-redirects to /setup, and /setup returns 404 without the claim token. Open this
-once to create the advisor account:
+If this is the first deploy, the app has no accounts and is serving nothing at
+all — every route redirects to /setup, and /setup returns 404 without the claim
+token. Open this once to create the advisor account:
 
-    ${URL}/setup?token=${TOKEN}
+    ${URL}/setup?token=${SETUP_TOKEN}
 
-Then, so the link can't be reused:
+(That token is rotated on every deploy, so an older link no longer works.)
+
+Once the advisor account exists, remove it so the link can't be reused:
 
     gcloud run services update $SERVICE --region $REGION \\
       --remove-secrets GRADAPP_SETUP_TOKEN
