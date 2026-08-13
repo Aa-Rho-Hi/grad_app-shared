@@ -68,6 +68,21 @@ DEMO_FACULTY = [
 
 
 @pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """The limiter's memory:// storage is per-process, and every test client
+    looks like the same IP, so counts pile up across unrelated tests until one
+    of them gets a surprise 429. Clear it between tests; a test that wants to
+    prove the limiter works trips it deliberately.
+    """
+    yield
+    try:
+        from src.app import limiter
+        limiter.reset()
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config(tmp_path, monkeypatch):
     from src import triage as triagemod
     from src import users as usersmod

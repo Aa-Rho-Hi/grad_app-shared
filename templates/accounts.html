@@ -48,17 +48,16 @@
   {% if not available %}
   <p class="muted" style="margin:10px 0 0">
     {% if not faculty %}
-    <b>No faculty on file.</b> A professor login has to point at someone on
-    <a href="{{ url_for('professors_view', edit=1) }}">the faculty list</a> — that
-    link is how the app knows whose queue to show. Add them there first.
+    <b>No faculty on file yet.</b> Choose <i>someone not on the list yet</i> and
+    type their name — they'll be added to
+    <a href="{{ url_for('professors_view', edit=1) }}">the faculty list</a> and
+    linked in one step.
     {% else %}
-    <b>Every professor already has a login.</b> A second account on the same
-    queue would mean two people seeing those applicants, so there's nobody left
-    to assign. Either <a href="{{ url_for('professors_view', edit=1) }}">add
-    them to the faculty list</a>, or remove the existing account above if
-    they're replacing it.
+    <b>Every professor on the list already has a login.</b> A second account on
+    the same queue would mean two people seeing those applicants. For a new
+    colleague choose <i>someone not on the list yet</i>; if this is replacing
+    someone, remove their account above first.
     {% endif %}
-    Until then these requests can only be approved as advisors.
   </p>
   {% endif %}
 
@@ -77,14 +76,15 @@
               <option value="professor" {% if not available %}disabled{% endif %}>Professor</option>
               <option value="advisor" {% if not available %}selected{% endif %}>Advisor</option>
             </select>
-            {% if available %}
             <select name="professor" class="ap-prof" required>
               <option value="">— which professor —</option>
               {% for p in available %}
               <option value="{{ p.id }}">{{ p.name }}</option>
               {% endfor %}
+              <option value="__new__">+ someone not on the list yet…</option>
             </select>
-            {% endif %}
+            <input type="text" name="new_professor" class="ap-new"
+                   placeholder="Their full name" style="display:none;min-width:170px">
             <button type="submit" class="primary" style="font-size:12px;padding:5px 11px">Approve</button>
           </form>
         </td>
@@ -106,11 +106,13 @@
 <div class="card">
   <h3 style="margin-top:0">How someone gets a login</h3>
   <ol class="muted" style="margin:10px 0 0;padding-left:20px;line-height:1.9">
-    <li>Add them to <a href="{{ url_for('professors_view', edit=1) }}">the faculty list</a>,
-        if they're a professor. That entry is how the app knows whose queue to show.</li>
     <li>They open the sign-in page, click <b>Create account</b>, and choose their
         own username and password.</li>
-    <li>Their request appears above. You approve it and pick what they are.</li>
+    <li>Their request appears above. You approve it and say what they are.</li>
+    <li>For a professor, pick them from the list — or <i>someone not on the list
+        yet</i> and type their name, which adds them to
+        <a href="{{ url_for('professors_view', edit=1) }}">the faculty list</a>
+        and links the account in one go.</li>
   </ol>
   <p class="muted" style="margin:14px 0 0">
     You never set anyone else's password — that's deliberate. A password you type
@@ -126,15 +128,23 @@
 </style>
 
 <script>
-// A professor login needs a professor; an advisor login doesn't.
+// A professor login needs a professor; an advisor login doesn't. And picking
+// "someone not on the list yet" swaps the dropdown for a name box.
 document.querySelectorAll('.ap-role').forEach(role => {
-  const prof = role.closest('form').querySelector('.ap-prof');
+  const form = role.closest('form');
+  const prof = form.querySelector('.ap-prof');
+  const fresh = form.querySelector('.ap-new');
   const sync = () => {
     const isProf = role.value === 'professor';
+    const isNew = isProf && prof.value === '__new__';
     prof.style.display = isProf ? '' : 'none';
     prof.required = isProf;
+    fresh.style.display = isNew ? '' : 'none';
+    fresh.required = isNew;
+    if (!isNew) fresh.value = '';
   };
   role.addEventListener('change', sync);
+  prof.addEventListener('change', sync);
   sync();
 });
 </script>

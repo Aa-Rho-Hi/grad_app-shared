@@ -522,11 +522,28 @@ def accounts():
 @limiter.limit("60/hour")
 def accounts_approve():
     username = request.form.get("username", "")
+    professor = request.form.get("professor", "")
+    new_name = request.form.get("new_professor", "").strip()
+    note = ""
+
+    # Approving someone who isn't on the faculty list yet is the common case
+    # for a new hire, and making the advisor leave the page, add them, and come
+    # back was friction with nothing behind it. Create the entry here and link
+    # it in one step. It's the same person doing the same two things.
+    if professor == "__new__" or (new_name and not professor):
+        try:
+            faculty = add_professor(load_professors(), new_name)
+        except ProfessorError as exc:
+            flash(str(exc))
+            return redirect(url_for("accounts"))
+        save_professors(faculty)
+        professor = faculty[-1]["id"]
+        note = f" Added {new_name} to the faculty list."
+
     try:
         save_users(approve_user(load_users(), username,
-                                request.form.get("role", ""),
-                                request.form.get("professor", "")))
-        flash(f"Approved {username}.")
+                                request.form.get("role", ""), professor))
+        flash(f"Approved {username}." + note)
     except UserError as exc:
         flash(str(exc))
     return redirect(url_for("accounts"))

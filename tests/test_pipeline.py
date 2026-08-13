@@ -1559,9 +1559,66 @@ def test_when_every_professor_is_taken_the_page_says_so(tmp_path, monkeypatch):
     client.post("/login", data={"username": "maya", "password": "pw"})
 
     page = client.get("/accounts").get_data(as_text=True)
-    assert "Every professor already has a login" in page
-    assert "which professor" not in page, "an empty dropdown should not render"
-    assert "No faculty on file" not in page, "wrong empty-state: faculty do exist"
+    assert "Every professor on the list already has a login" in page
+    assert 'value="gratz-paul"' not in page, "the taken one must not be offered"
+    assert 'value="__new__"' in page, "but a new colleague is still addable"
+
+
+def test_approving_can_create_the_faculty_entry(tmp_path, monkeypatch):
+    """A new hire shouldn't mean leaving the page, adding them, and coming back."""
+    from src import triage as triagemod
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+    client.post("/signup", data={"username": "newhire", "password": "pw1234",
+                                 "confirm": "pw1234"})
+    client.post("/login", data={"username": "maya", "password": "pw"})
+
+    before = {p["id"] for p in triagemod.load_professors()}
+    r = client.post("/accounts/approve",
+                    data={"username": "newhire", "role": "professor",
+                          "professor": "__new__", "new_professor": "Ada Lovelace"},
+                    follow_redirects=True)
+    assert b"Added Ada Lovelace to the faculty list" in r.data
+
+    added = [p for p in triagemod.load_professors() if p["id"] not in before]
+    assert [p["name"] for p in added] == ["Ada Lovelace"]
+    row = next(u for u in usersmod.load_users() if u["username"] == "newhire")
+    assert row["role"] == "professor" and row["professor"] == added[0]["id"]
+
+    # they land on their own (empty) queue, not the advisor's flow
+    client.get("/logout")
+    client.post("/login", data={"username": "newhire", "password": "pw1234"})
+    assert client.get("/prof").status_code == 200
+    assert client.get("/applicants").status_code == 403
+
+
+def test_creating_faculty_at_approval_rejects_a_duplicate_name(tmp_path, monkeypatch):
+    """Two faculty entries for one person would split their queue in half."""
+    from src import triage as triagemod
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+    client.post("/signup", data={"username": "dupe", "password": "pw1234",
+                                 "confirm": "pw1234"})
+    client.post("/login", data={"username": "maya", "password": "pw"})
+
+    before = len(triagemod.load_professors())
+    r = client.post("/accounts/approve",
+                    data={"username": "dupe", "role": "professor",
+                          "professor": "__new__", "new_professor": "Paul Gratz"},
+                    follow_redirects=True)
+    assert b"already on the list" in r.data
+    assert len(triagemod.load_professors()) == before
+    assert next(u for u in usersmod.load_users()
+                if u["username"] == "dupe")["role"] == usersmod.PENDING
+
+    # and a blank name doesn't create an unnamed entry
+    client.post("/accounts/approve",
+                data={"username": "dupe", "role": "professor",
+                      "professor": "__new__", "new_professor": "   "},
+                follow_redirects=True)
+    assert len(triagemod.load_professors()) == before
 
 
 def test_no_faculty_means_no_professor_account(tmp_path, monkeypatch):
