@@ -1562,6 +1562,32 @@ def test_when_every_professor_is_taken_the_page_says_so(tmp_path, monkeypatch):
     assert "Every professor on the list already has a login" in page
     assert 'value="gratz-paul"' not in page, "the taken one must not be offered"
     assert 'value="__new__"' in page, "but a new colleague is still addable"
+    # ...and the role itself must stay choosable, or the advice above it is a
+    # lie: the page says "pick someone not on the list yet" while the dropdown
+    # refuses to let you be a professor at all.
+    assert 'value="professor" disabled' not in page
+    assert "disabled" not in page.split("Grant access as")[1].split("</table>")[0]
+
+
+def test_a_professor_can_be_approved_when_the_faculty_list_is_full(tmp_path, monkeypatch):
+    """The end of that road: every existing professor taken, and a new one
+    approved anyway by naming them."""
+    from src import triage as triagemod
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+    triagemod.save_professors([{"id": "gratz-paul", "name": "Paul Gratz"}],
+                              triagemod.PROFESSORS_YAML)
+    client.post("/signup", data={"username": "newhire", "password": "pw1234",
+                                 "confirm": "pw1234"})
+    client.post("/login", data={"username": "maya", "password": "pw"})
+
+    client.post("/accounts/approve",
+                data={"username": "newhire", "role": "professor",
+                      "professor": "__new__", "new_professor": "Ada Lovelace"})
+    row = next(u for u in usersmod.load_users() if u["username"] == "newhire")
+    assert row["role"] == "professor" and row["professor"] == "ada-lovelace"
+    assert "Ada Lovelace" in [p["name"] for p in triagemod.load_professors()]
 
 
 def test_approving_can_create_the_faculty_entry(tmp_path, monkeypatch):

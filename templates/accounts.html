@@ -48,14 +48,15 @@
   {% if not available %}
   <p class="muted" style="margin:10px 0 0">
     {% if not faculty %}
-    <b>No faculty on file yet.</b> Choose <i>someone not on the list yet</i> and
-    type their name — they'll be added to
+    <b>No faculty on file yet.</b> To approve someone as a professor, pick
+    <i>someone not on the list yet</i> and type their name — they'll be added to
     <a href="{{ url_for('professors_view', edit=1) }}">the faculty list</a> and
     linked in one step.
     {% else %}
-    <b>Every professor on the list already has a login.</b> A second account on
-    the same queue would mean two people seeing those applicants. For a new
-    colleague choose <i>someone not on the list yet</i>; if this is replacing
+    <b>Every professor on the list already has a login</b>, so there's nobody
+    existing left to link to — a second account on the same queue would mean two
+    people seeing those applicants. You can still approve a professor: pick
+    <i>someone not on the list yet</i> and type their name. If this is replacing
     someone, remove their account above first.
     {% endif %}
   </p>
@@ -72,9 +73,13 @@
                 class="aform" id="ap-{{ loop.index }}" style="gap:6px">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="username" value="{{ u.username }}">
+            {# Professor is always selectable. It used to be disabled when every
+               faculty member already had a login, which stopped making sense the
+               moment "someone not on the list yet" existed — there is now always
+               a way to be a professor. #}
             <select name="role" class="ap-role">
-              <option value="professor" {% if not available %}disabled{% endif %}>Professor</option>
-              <option value="advisor" {% if not available %}selected{% endif %}>Advisor</option>
+              <option value="professor">Professor</option>
+              <option value="advisor">Advisor</option>
             </select>
             <select name="professor" class="ap-prof" required>
               <option value="">— which professor —</option>
