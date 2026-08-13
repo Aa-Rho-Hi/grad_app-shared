@@ -132,14 +132,29 @@ def authenticate(username: str, password: str,
     return found if (found and ok) else None
 
 
-def _vet_professor(role: str, professor: str) -> str:
-    """A professor login must point at somebody on the faculty list.
+def linked_professors(users: List[Dict[str, Any]], *, ignoring: str = "") -> Dict[str, str]:
+    """{professor id: the username already holding it}."""
+    return {u["professor"]: u["username"] for u in users
+            if u["professor"] and u["role"] == PROFESSOR
+            and u["username"] != ignoring}
 
-    The link is what tells the app whose queue to show, so an account naming an
-    id that doesn't exist isn't a small inconsistency — the person signs in,
-    lands on their deck, and sees an empty queue forever with nothing to
-    indicate why. The CLI checked this and the web routes didn't; it lives here
-    now so every path that can mint an account gets the same answer.
+
+def _vet_professor(role: str, professor: str,
+                   users: Optional[List[Dict[str, Any]]] = None,
+                   username: str = "") -> str:
+    """A professor login must point at exactly one real person on the faculty list.
+
+    Two rules, and both exist because the link is what tells the app whose
+    queue to show:
+
+    * The id has to exist. An account naming one that doesn't isn't a small
+      inconsistency — the person signs in, lands on their deck, and sees an
+      empty queue forever with nothing to say why.
+    * The id can't already be taken. Pointing a second account at a professor
+      silently hands someone else that professor's applicants, which is an
+      access-control decision dressed up as a dropdown choice. If a professor
+      genuinely needs a new login, remove the old account first — deliberate
+      and visible, rather than two accounts nobody remembers creating.
     """
     if role != PROFESSOR:
         return ""
@@ -156,6 +171,13 @@ def _vet_professor(role: str, professor: str) -> str:
     if not any(p["id"] == professor for p in faculty):
         raise UserError(f"No professor with id {professor!r} on the faculty "
                         "list (see config/professors.yaml).")
+    taken = linked_professors(users or [], ignoring=username)
+    if professor in taken:
+        name = next((p["name"] for p in faculty if p["id"] == professor), professor)
+        raise UserError(
+            f"{name} already signs in as '{taken[professor]}'. Remove that "
+            "account first if they need a new one — two logins on one queue "
+            "means two people seeing the same applicants.")
     return professor
 
 
@@ -174,7 +196,7 @@ def add_user(users: List[Dict[str, Any]], username: str, password: str, role: st
              professor: str = "") -> List[Dict[str, Any]]:
     if role not in ROLES:
         raise UserError(f"Role must be one of {', '.join(ROLES)}.")
-    professor = _vet_professor(role, professor)
+    professor = _vet_professor(role, professor, users)
     username = _vet_new(users, username, password)
     return list(users) + [{"username": username, "role": role,
                            "professor": professor,
@@ -199,7 +221,7 @@ def approve_user(users: List[Dict[str, Any]], username: str, role: str,
     """Grant a pending request the role an advisor picked for it."""
     if role not in ROLES:
         raise UserError(f"Role must be one of {', '.join(ROLES)}.")
-    professor = _vet_professor(role, professor)
+    professor = _vet_professor(role, professor, users, username)
     out, hit = [], False
     for u in users:
         if u["username"] == username and u["role"] == PENDING:

@@ -45,12 +45,20 @@
      can't open anything until you say what they are. Approve only people you
      recognise — anyone who can reach the app can send a request.</p>
 
-  {% if not professors %}
+  {% if not available %}
   <p class="muted" style="margin:10px 0 0">
+    {% if not faculty %}
     <b>No faculty on file.</b> A professor login has to point at someone on
     <a href="{{ url_for('professors_view', edit=1) }}">the faculty list</a> — that
-    link is how the app knows whose queue to show. Add them there first;
-    until then these requests can only be approved as advisors.
+    link is how the app knows whose queue to show. Add them there first.
+    {% else %}
+    <b>Every professor already has a login.</b> A second account on the same
+    queue would mean two people seeing those applicants, so there's nobody left
+    to assign. Either <a href="{{ url_for('professors_view', edit=1) }}">add
+    them to the faculty list</a>, or remove the existing account above if
+    they're replacing it.
+    {% endif %}
+    Until then these requests can only be approved as advisors.
   </p>
   {% endif %}
 
@@ -66,14 +74,14 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="username" value="{{ u.username }}">
             <select name="role" class="ap-role">
-              <option value="professor" {% if not professors %}disabled{% endif %}>Professor</option>
-              <option value="advisor" {% if not professors %}selected{% endif %}>Advisor</option>
+              <option value="professor" {% if not available %}disabled{% endif %}>Professor</option>
+              <option value="advisor" {% if not available %}selected{% endif %}>Advisor</option>
             </select>
-            {% if professors %}
-            <select name="professor" class="ap-prof">
+            {% if available %}
+            <select name="professor" class="ap-prof" required>
               <option value="">— which professor —</option>
-              {% for p in professors %}
-              <option value="{{ p.id }}">{{ p.name }}{% if p.id in linked %} (already has a login){% endif %}</option>
+              {% for p in available %}
+              <option value="{{ p.id }}">{{ p.name }}</option>
               {% endfor %}
             </select>
             {% endif %}

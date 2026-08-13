@@ -1515,6 +1515,55 @@ def test_a_professor_login_must_point_at_real_faculty(tmp_path, monkeypatch):
     assert row["role"] == "professor" and row["professor"] == "fan-zhiwen"
 
 
+def test_one_login_per_professor(tmp_path, monkeypatch):
+    """Assigning a second account to a professor hands someone else that
+    professor's applicants — an access decision wearing a dropdown's clothes."""
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)         # pgratz already holds gratz-paul
+    client.post("/signup", data={"username": "impostor", "password": "pw1234",
+                                 "confirm": "pw1234"})
+    client.post("/login", data={"username": "maya", "password": "pw"})
+
+    r = client.post("/accounts/approve",
+                    data={"username": "impostor", "role": "professor",
+                          "professor": "gratz-paul"}, follow_redirects=True)
+    assert b"already signs in as" in r.data
+    assert next(u for u in usersmod.load_users()
+                if u["username"] == "impostor")["role"] == usersmod.PENDING
+
+    # the taken one isn't even offered
+    page = client.get("/accounts").get_data(as_text=True)
+    assert 'value="gratz-paul"' not in page
+    assert 'value="fan-zhiwen"' in page            # still free
+
+    # freeing it up makes it assignable again
+    client.post("/accounts/remove", data={"username": "pgratz"})
+    assert 'value="gratz-paul"' in client.get("/accounts").get_data(as_text=True)
+    client.post("/accounts/approve", data={"username": "impostor",
+                                           "role": "professor",
+                                           "professor": "gratz-paul"})
+    assert next(u for u in usersmod.load_users()
+                if u["username"] == "impostor")["professor"] == "gratz-paul"
+
+
+def test_when_every_professor_is_taken_the_page_says_so(tmp_path, monkeypatch):
+    """The screenshot case: a dropdown that looks full but has nothing in it."""
+    from src import triage as triagemod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+    triagemod.save_professors([{"id": "gratz-paul", "name": "Paul Gratz"}],
+                              triagemod.PROFESSORS_YAML)   # the only one, taken
+    client.post("/signup", data={"username": "test", "password": "pw1234",
+                                 "confirm": "pw1234"})
+    client.post("/login", data={"username": "maya", "password": "pw"})
+
+    page = client.get("/accounts").get_data(as_text=True)
+    assert "Every professor already has a login" in page
+    assert "which professor" not in page, "an empty dropdown should not render"
+    assert "No faculty on file" not in page, "wrong empty-state: faculty do exist"
+
+
 def test_no_faculty_means_no_professor_account(tmp_path, monkeypatch):
     """What the advisor is told to do when the faculty list is empty."""
     from src import triage as triagemod

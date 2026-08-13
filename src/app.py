@@ -67,7 +67,7 @@ from .triage import (PROF_DECISIONS, SWIPES, ProfessorError, add_professor,
 from .status_report import write_status_report
 from .store import Store, db_path_for
 from .users import (ADVISOR, PENDING, PROFESSOR, UserError, add_user,
-                    approve_user, authenticate, load_users,
+                    approve_user, authenticate, linked_professors, load_users,
                     login_required_globally, pending_users, remove_user,
                     request_account, save_users)
 
@@ -504,11 +504,17 @@ def setup():
 def accounts():
     """Who can sign in. Advisor-only: it hands out access."""
     people = load_users()
-    linked = {u["professor"] for u in people if u["professor"]}
+    faculty = load_professors()
+    taken = linked_professors(people)
+    # Only offer professors who can actually be assigned. Listing the taken
+    # ones greyed out reads as "pick me and something reasonable happens"; what
+    # actually happens is a second person on that professor's queue.
     return render_template("accounts.html",
                            users=[u for u in people if u["role"] != PENDING],
                            waiting=pending_users(people),
-                           professors=load_professors(), linked=linked)
+                           faculty=faculty,
+                           available=[p for p in faculty if p["id"] not in taken],
+                           taken=taken)
 
 
 @app.route("/accounts/approve", methods=["POST"])
