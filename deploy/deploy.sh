@@ -433,18 +433,64 @@ URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='valu
 # Chicken and egg: a queued task calls the service back, so it needs the URL,
 # which doesn't exist until the first deploy. Set it on a second pass. On every
 # later run these are already correct and this is a no-op revision.
+# The invoker binding comes BEFORE the queue is switched on, and gates it.
+# A queued task calls the service back over HTTP; if the tasks account can't
+# invoke the service, every callback 403s and uploads enqueue and then silently
+# never complete — worse than not queueing at all, because it looks like it
+# should work. Ordering these the other way round shipped exactly that.
 if [ "$QUEUE_READY" = 1 ]; then
-  say "Pointing the queue at $URL"
-  gcloud run services update "$SERVICE" --region "$REGION" \
-    --update-env-vars "GRADAPP_TASK_QUEUE=${QUEUE_PATH},GRADAPP_BASE_URL=${URL},GRADAPP_TASK_INVOKER=${TASKS_EMAIL}" \
-    >/dev/null
-  gcloud run services add-iam-policy-binding "$SERVICE" --region "$REGION" \
-    --member="serviceAccount:$TASKS_EMAIL" --role=roles/run.invoker >/dev/null 2>&1 || true
+  if gcloud run services add-iam-policy-binding "$SERVICE" --region "$REGION" \
+       --member="serviceAccount:$TASKS_EMAIL" --role=roles/run.invoker >/dev/null 2>&1; then
+    say "Pointing the queue at $URL"
+    gcloud run services update "$SERVICE" --region "$REGION" \
+      --update-env-vars "GRADAPP_TASK_QUEUE=${QUEUE_PATH},GRADAPP_BASE_URL=${URL},GRADAPP_TASK_INVOKER=${TASKS_EMAIL}" \
+      >/dev/null
+  else
+    QUEUE_READY=0
+    QUEUE_NOTE="Queued ingest is OFF. The deploy could not grant Cloud Tasks
+permission to call this service back (roles/run.invoker), so every queued task
+would have been rejected and uploads would have hung. Ingest runs on the
+request thread instead, which is how this worked before the queue existed.
+
+To turn it on, an administrator runs:
+
+  gcloud run services add-iam-policy-binding $SERVICE --region $REGION \\
+    --member=serviceAccount:$TASKS_EMAIL --role=roles/run.invoker
+
+then re-run this script."
+    # and make sure a previous revision's queue settings don't linger
+    gcloud run services update "$SERVICE" --region "$REGION" \
+      --remove-env-vars GRADAPP_TASK_QUEUE,GRADAPP_BASE_URL,GRADAPP_TASK_INVOKER \
+      >/dev/null 2>&1 || true
+  fi
 fi
+
+# Whether the service is reachable at all. --allow-unauthenticated is itself an
+# IAM policy change, so on a locked-down project it fails and leaves a service
+# nobody can open — with the failure buried in a "Completed with warnings" line
+# that is easy to read past.
+PUBLIC="$(gcloud run services get-iam-policy "$SERVICE" --region "$REGION" \
+  --format='value(bindings.members)' 2>/dev/null | grep -c allUsers || true)"
 
 cat <<EOF
 
 Deployed: $URL
+
+$(if [ "${PUBLIC:-0}" = 0 ]; then cat <<INNER
+NOT REACHABLE YET. Granting public access is an IAM change, and this project
+refused it, so opening that URL in a browser returns 403. Two ways on:
+
+  Right now, just you:
+    gcloud run services proxy $SERVICE --region $REGION
+    then open http://localhost:8080
+
+  For everyone (an administrator runs this once):
+    gcloud run services add-iam-policy-binding $SERVICE --region $REGION \\
+      --member=allUsers --role=roles/run.invoker
+
+Public here means "reachable"; the app's own login still gates every page.
+INNER
+fi)
 
 If this is the first deploy, the app has no accounts and is serving nothing at
 all — every route redirects to /setup, and /setup returns 404 without the claim
