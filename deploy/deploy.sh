@@ -21,6 +21,14 @@
 
 set -euo pipefail
 
+# gcloud asks questions — most usefully "API [x] not enabled. Enable and
+# retry? (y/N)". The existence probes below send stderr to /dev/null, so such a
+# prompt is invisible and the script just appears to hang mid-list with no
+# cursor and nothing to type at. Turn prompting off globally: this script's own
+# confirmation uses `read`, and every gcloud call here should either work or
+# fail, never ask.
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
 PROJECT="${1:?usage: deploy.sh PROJECT_ID [REGION]}"
 REGION="${2:-us-central1}"
 
@@ -124,7 +132,17 @@ fi
 
 # What already exists, so nothing is created by surprise in a shared project.
 say "What this will do in $PROJECT"
-exists() { eval "$1" >/dev/null 2>&1 && echo "reuse " || echo "CREATE"; }
+# Timeboxed: a probe against a disabled API or an unreachable service should
+# report "CREATE" and move on, not stall the listing. Anything that can't be
+# read in five seconds is treated as absent, which is the safe reading — the
+# create steps below are all guarded and will reuse whatever is really there.
+exists() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 5 bash -c "$1" >/dev/null 2>&1 && echo "reuse " || echo "CREATE"
+  else
+    eval "$1" >/dev/null 2>&1 && echo "reuse " || echo "CREATE"
+  fi
+}
 printf '  %s  Cloud SQL instance  %s\n' \
   "$(exists "gcloud sql instances describe $DB_INSTANCE")" "$DB_INSTANCE"
 printf '  %s  Storage bucket      %s\n' \
