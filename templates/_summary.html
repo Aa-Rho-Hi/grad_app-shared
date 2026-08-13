@@ -1,0 +1,48 @@
+{# Renders the summary card produced by src/template.py:render().
+
+   The renderer emits plain text so the .md download stays readable:
+     block 1  — identity line, facts line, "Applied: ..." line (last two optional)
+     block n  — "### Section" heading followed by "- item" lines, where an item
+                may open with a short "Label: " prefix (Areas, Goal, Fit, ...)
+   This macro turns those blocks into headed sections for the web UI. Anything
+   it doesn't recognise falls through as a plain line, so the card degrades
+   gracefully if the renderer grows a new section. #}
+{% macro summary_card(text) %}
+{% set blocks = (text or '').split('\n\n') %}
+<div class="summary">
+  {% for block in blocks %}
+    {% set lines = [] %}
+    {% for l in block.split('\n') if l.strip() %}{% set _ = lines.append(l.strip()) %}{% endfor %}
+    {% if lines and lines[0].startswith('### ') %}
+      {% set title = lines[0][4:] %}
+      <div class="sect s-{{ title.split(' ')[0]|lower }}">
+        <h4>{{ title }}</h4>
+        <ul>
+          {% for line in lines[1:] %}
+            {% set item = line[2:] if line.startswith('- ') else line %}
+            {% set head = item.split(': ')[0] %}
+            {# A "label" is one short word, so a sentence that merely contains a
+               colon ("Software: MATLAB" inside a long clause) isn't mistaken
+               for one. #}
+            {% if ': ' in item and ' ' not in head and head|length < 14 %}
+              <li><b>{{ head }}:</b> {{ item[head|length + 2:] }}</li>
+            {% else %}
+              <li>{{ item }}</li>
+            {% endif %}
+          {% endfor %}
+        </ul>
+      </div>
+    {% else %}
+      {% for line in lines %}
+        {% if loop.first and blocks.index(block) == 0 %}
+          <div class="ident">{{ line }}</div>
+        {% elif line.startswith('Applied:') %}
+          <div class="applied">{{ line }}</div>
+        {% else %}
+          <div class="facts">{{ line }}</div>
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+  {% endfor %}
+</div>
+{% endmacro %}

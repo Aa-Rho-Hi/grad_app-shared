@@ -1,0 +1,28 @@
+# Faculty who can receive shortlisted applicants for review.
+#
+# Editable here or from the app's "Professor queues" page — both write this
+# file. `id` is what gets stored on the applicant's record, so it is generated
+# once from the name and then left alone: renaming a professor is safe, changing
+# an id orphans whoever was already assigned.
+#
+# `areas` is optional and only used to help the reviewer pick.
+professors:
+- id: duffield-nick
+  name: Nick Duffield
+  url: https://engineering.tamu.edu/electrical/profiles/duffield-nick.html
+- id: fan-zhiwen
+  name: Zhiwen Fan
+  url: https://engineering.tamu.edu/electrical/profiles/fan-zhiwen.html
+- id: gratz-paul
+  name: Paul Gratz
+  url: https://engineering.tamu.edu/electrical/profiles/pgratz.html
+- id: narayanan-krishna
+  name: Krishna Narayanan
+  url: https://engineering.tamu.edu/electrical/profiles/knarayanan.html
+- id: img-src-x-onerror-alert-1
+  name: <img src=x onerror=alert(1)>
+  url: https://x.test/p
+- id: anchor-a-x-1-comment
+  name: '*anchor: &a [{''x'': 1}]
+
+    #comment'

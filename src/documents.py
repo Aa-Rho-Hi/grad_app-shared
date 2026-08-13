@@ -11,7 +11,8 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 from .analyze import (analyze_text, extract_recommender, extract_test_scores,
-                      jaccard, load_keywords)
+                      jaccard_sets, load_keywords, shingles, sketch,
+                      sketch_similarity)
 from .merge import summary_view, upsert_source
 from .store import Store, db_path_for
 from .template import render
@@ -87,20 +88,61 @@ def infer_cas_id(path: str) -> Optional[str]:
     return stem.split("_")[0] if "_" in stem else None
 
 
+# How many shortlisted SOPs get an exact comparison. Bounds the work per
+# document regardless of cohort size or how alike everyone's essays are.
+_DUP_CANDIDATES = 25
+
+
 def _most_similar_sop(store: Store, this_cas_id: str, text: str):
     """Return (other_cas_id, similarity) for the most similar existing SOP
-    above the configured threshold, else None. Deterministic, local."""
+    above the configured threshold, else None. Deterministic, local.
+
+    Two things keep this usable on a real intake, where it runs once per
+    incoming SOP against every SOP already on file:
+
+    * the incoming text is tokenized **once**, not once per comparison — the
+      old version re-shingled both sides of every pair, which is the whole cost;
+    * candidates whose length is wildly different are skipped. Trigram Jaccard
+      is bounded by the length ratio (the union is at least the larger set), so
+      a document three times longer can't reach a 0.55 threshold — comparing
+      them is arithmetic with a known answer.
+
+    It is still O(n) per document and O(n²) per batch. That is affordable for a
+    few thousand; past that this wants a MinHash index, not a bigger constant.
+    """
     threshold = (load_keywords().get("thresholds", {}) or {}).get("duplicate_similarity", 0.55)
+    mine = shingles(text)
+    if not mine:
+        return None
+    my_sketch = sketch(text)
+
+    # Pass 1 — shortlist from the index. Every applicant's SOP sketch is cached
+    # there, so this is integer set work rather than deserializing thousands of
+    # records (each carrying full essay text) once per incoming document.
+    # The margin is deliberate: the sketch is an estimate, so a candidate is
+    # anything plausibly close, not anything already over the line.
+    margin = threshold * 0.7
+    scored = [(sketch_similarity(my_sketch, other_sketch), cas_id)
+              for cas_id, other_sketch in store.sop_sketches()
+              if cas_id != this_cas_id]
+    # Best estimates first, and only so many: on a cohort where everyone writes
+    # the same template every applicant clears the margin, and the exact pass
+    # would be a full read per document again. We report the *most* similar
+    # match, so the top of the estimated ranking is where it lives.
+    candidates = [cas_id for est, cas_id in sorted(scored, reverse=True)
+                  if est >= margin][:_DUP_CANDIDATES]
+
+    # Pass 2 — the shortlist only, compared exactly. The number a reviewer ends
+    # up reading is a real Jaccard, never the estimate.
     best = None
-    for other in store.all():
-        if other.get("student_id") == this_cas_id:
-            continue
-        sop = (other.get("sources", {}) or {}).get("sop")
+    for cas_id in candidates:
+        other = store.get(cas_id)
+        sop = ((other or {}).get("sources", {}) or {}).get("sop")
         if not sop or not sop.get("text"):
             continue
-        score = jaccard(text, sop["text"])
+        score = jaccard_sets(mine, shingles(sop["text"]))
         if score >= threshold and (best is None or score > best[1]):
-            best = (other.get("student_id"), score)
+            best = (cas_id, score)
     return best
 
 

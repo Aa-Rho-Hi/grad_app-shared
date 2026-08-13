@@ -1,8 +1,9 @@
 {% extends "base.html" %}
+{% from "_summary.html" import summary_card %}
 {% block title %}{{ rec.personal.full_name or rec.cas_id }} — Grad App{% endblock %}
 {% block body %}
 
-<p class="back"><a href="{{ url_for('index') }}">← All applicants</a></p>
+<p class="back"><a href="{{ url_for('applicants') }}">← All applicants</a></p>
 
 <div class="card">
   <h2 style="margin:0 0 4px">{{ rec.personal.full_name or rec.cas_id }}</h2>
@@ -19,7 +20,7 @@
     <span class="chip {{ 's' if srcs.resume else '' }}">Resume{{ ' ✓' if srcs.resume else ' —' }}</span>
     <span class="chip {{ 's' if srcs.sop else '' }}">SOP{{ ' ✓' if srcs.sop else ' —' }}</span>
     <span class="chip {{ 's' if srcs.lors else '' }}">LORs ({{ srcs.lors|length }})</span>
-    {% if unified.ocr and unified.ocr.ocr_pages_read %}<span class="chip" style="background:#fdf3da;color:#8a6d00">📄 OCR · {{ unified.ocr.ocr_pages_read }} scanned page(s) read</span>{% endif %}
+    {% if unified.ocr and unified.ocr.ocr_pages_read %}<span class="chip d-tbd">📄 OCR · {{ unified.ocr.ocr_pages_read }} scanned page(s) read</span>{% endif %}
   </div>
   {% if unified.ocr and unified.ocr.ocr_pages_read %}
     <p class="muted" style="margin-top:6px">This packet was partly scanned; {{ unified.ocr.ocr_pages_read }} page(s) were read with OCR (text may have minor recognition errors).</p>
@@ -45,7 +46,7 @@
 
 <div class="card">
   <h3 style="margin-top:0">Summary</h3>
-  <div class="summary">{{ summary.summary_text }}</div>
+  {{ summary_card(summary.summary_text) }}
 </div>
 
 {% set resume = unified.sources.resume %}

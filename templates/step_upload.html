@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% from "_wizard.html" import stepper, dropzones %}
+{% block title %}Step 1 — Upload{% endblock %}
+{% block body %}
+
+{{ stepper(1) }}
+
+<div class="card">
+  <h3 style="margin-top:0">Step 1 — Upload the applications</h3>
+  <p class="muted">The spreadsheet gives one row per applicant; the packets are where the
+     undergrad degree and the summary come from. Add both — nothing is summarized yet.</p>
+
+  {{ dropzones(url_for('process'), 'Application data', 'CSV or Excel — one row per applicant', 'Process →') }}
+</div>
+
+{% if count %}
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+    <div class="chips" style="margin:0">
+      <span class="chip">{{ count }} applicant(s) already on file</span>
+      {% if coverage %}<span class="chip">{{ coverage.with_degree }} of {{ coverage.total }} with a degree</span>{% endif %}
+      {% if quarantine %}<span class="chip w">{{ quarantine }} quarantined</span>{% endif %}
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <form action="{{ url_for('reset') }}" method="post" style="display:flex;align-items:center;gap:6px"
+            onsubmit="return confirm(this.purge_raw.checked
+              ? 'Clear all {{ count }} applicant(s) AND permanently delete the uploaded files?'
+              : 'Clear all {{ count }} applicant(s) and start fresh?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label class="muted" style="font-weight:normal;display:flex;align-items:center;gap:4px;font-size:12px"
+               title="Also delete the original uploaded files from data/raw, not just the records">
+          <input type="checkbox" name="purge_raw" value="1"> also delete uploads
+        </label>
+        <button type="submit" class="danger">Clear all</button>
+      </form>
+      <a href="{{ url_for('applicants') }}"><button type="button">See all</button></a>
+      <a href="{{ url_for('step_sheet') }}"><button type="button" class="primary">Next →</button></a>
+    </div>
+  </div>
+  <p class="muted" style="margin:10px 0 0">Left over from an earlier run. Upload above to add to it,
+     or clear it and start fresh.</p>
+  {% if coverage and coverage.no_packet %}
+  <p class="muted" style="margin:10px 0 0">{{ coverage.no_packet }} applicant(s) have no packet on file —
+     their degree can't be read and their card will be thin. Add the packets above before moving on.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

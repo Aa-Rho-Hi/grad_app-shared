@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Shortlist — Grad App{% endblock %}
+{% block body %}
+
+<p class="back"><a href="{{ url_for('applicants') }}">← All applicants</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('triage') }}">Triage deck{% if remaining %} ({{ remaining }} left){% endif %}</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Professor queues</a></p>
+
+{% if applicants %}
+<div class="card">
+  <h3 style="margin-top:0">Shortlist <span class="chip">{{ applicants|length }}</span></h3>
+  <p class="muted">Everyone you swiped right. Pick the professor who should review them —
+     one each; picking again moves them.</p>
+</div>
+
+{% for a in applicants %}
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+    <div>
+      <h3 style="margin:0"><a href="{{ url_for('student', cas_id=a.cas_id) }}">{{ a.name }}</a>
+        <span class="muted" style="font-weight:400;font-size:13px">· {{ a.cas_id }}</span></h3>
+      {% set m = a.metrics or {} %}
+      <div class="muted" style="font-size:13px;margin-top:4px">
+        {% if m.get('gpa_value') %}GPA {{ m.get('gpa_value') }}{% if m.get('gpa_scale') and not m.get('gpa_assumed') %}/{{ m.get('gpa_scale') }}{% endif %}{% endif %}
+        {% if m.get('areas') %} · {{ m.get('areas')|join(', ') }}{% endif %}
+      </div>
+    </div>
+    <div>
+      {% if a.professor %}
+        <span class="chip s" data-chip="{{ a.cas_id }}">→ {{ a.professor.name }}</span>
+      {% else %}
+        <span class="chip w" data-chip="{{ a.cas_id }}">unassigned</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <form action="{{ url_for('triage_assign') }}" method="post" class="assign">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="cas_id" value="{{ a.cas_id }}">
+    <label for="p-{{ a.cas_id }}">Reviewer</label>
+    <select id="p-{{ a.cas_id }}" name="professor">
+      <option value="" {{ 'selected' if not a.professor }}>— not assigned —</option>
+      {% for p in professors %}
+      <option value="{{ p.id }}" {{ 'selected' if a.professor and a.professor.id == p.id }}>{{ p.name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Save</button>
+  </form>
+</div>
+{% endfor %}
+
+{% else %}
+<div class="card">
+  <h3 style="margin-top:0">Nothing shortlisted yet</h3>
+  <p class="muted">Swipe right on an applicant in the <a href="{{ url_for('triage') }}">triage deck</a>
+     and they'll show up here.</p>
+</div>
+{% endif %}
+
+<div class="card">
+  <p class="muted" style="margin:0">Professors are listed in <code>config/professors.yaml</code> —
+    edit that file to change who appears here.
+    {% for p in professors %}{% if p.url %}<a href="{{ p.url }}" target="_blank" rel="noopener">{{ p.name }}</a>{% if not loop.last %} · {% endif %}{% endif %}{% endfor %}
+  </p>
+</div>
+
+<style>
+  .assign{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .assign label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .assign select{min-width:210px;cursor:pointer}
+  .assign button{font-size:13px;padding:8px 14px}
+</style>
+
+<script>
+// Changing the dropdown saves straight away, in place — no reload, and the
+// chip next to the name updates so you can see it landed.
+document.querySelectorAll('form.assign').forEach(function(form){
+  const sel = form.querySelector('select');
+  function save(){
+    window.postForm(form, function(data){
+      const chip = document.querySelector('[data-chip="' + data.cas_id + '"]');
+      if (chip){
+        chip.textContent = data.professor ? '→ ' + data.name : 'unassigned';
+        chip.className = 'chip ' + (data.professor ? 's' : 'w');
+      }
+    });
+  }
+  sel.addEventListener('change', save);
+  form.addEventListener('submit', function(ev){ ev.preventDefault(); save(); });
+});
+</script>
+{% endblock %}

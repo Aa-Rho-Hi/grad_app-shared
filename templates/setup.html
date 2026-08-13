@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Set up logins — Grad App{% endblock %}
+{% block body %}
+
+<div class="card" style="max-width:460px;margin:6vh auto">
+  <h3 style="margin-top:0">Set up logins</h3>
+  <p class="muted">Create the advisor account. From then on every page needs a sign-in,
+     and you can add a login per professor from the Accounts page.</p>
+
+  <form method="post" style="display:flex;flex-direction:column;gap:10px;margin-top:14px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {# Carries the operator's claim token through the POST, so the form works
+       from a ?token=… link without putting it in the action URL. #}
+    <input type="hidden" name="token" value="{{ request.values.get('token', '') }}">
+    <label>
+      <span class="muted" style="display:block;margin-bottom:4px">Username</span>
+      <input type="text" name="username" autocomplete="username" autofocus required style="width:100%">
+    </label>
+    <label>
+      <span class="muted" style="display:block;margin-bottom:4px">Password</span>
+      <input type="password" name="password" autocomplete="new-password" required
+             minlength="4" style="width:100%;font-size:14px;padding:8px 11px;
+             border:1px solid var(--line-strong);border-radius:9px;font-family:inherit">
+    </label>
+    <label>
+      <span class="muted" style="display:block;margin-bottom:4px">Confirm password</span>
+      <input type="password" name="confirm" autocomplete="new-password" required
+             minlength="4" style="width:100%;font-size:14px;padding:8px 11px;
+             border:1px solid var(--line-strong);border-radius:9px;font-family:inherit">
+    </label>
+    <button type="submit" class="primary" style="margin-top:4px">Create account and sign in</button>
+  </form>
+
+  <p class="muted" style="margin:14px 0 0;font-size:12px">
+    Stored as a salted PBKDF2 hash in <code>config/users.yaml</code>, never in the clear.
+    A short password is fine while this only runs on your own machine; pick a real one
+    before it's reachable from anywhere else.
+    Delete that file and the app goes back to running without a login. There's no
+    password reset — if you forget it, delete the file and set up again.
+  </p>
+</div>
+{% endblock %}

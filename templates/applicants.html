@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% from "_summary.html" import summary_card %}
+{% block title %}All applicants — Grad App{% endblock %}
+{% block body %}
+
+<p class="back"><a href="{{ url_for('index') }}">← Dashboard</a>
+   {% if tbd_count %}&nbsp;·&nbsp; <a href="{{ url_for('triage') }}">Triage ({{ tbd_count }} tbd)</a>{% endif %}
+   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Professor queues</a></p>
+
+{% if summaries %}
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+    <div class="chips" style="margin:0">
+      <span class="chip">{{ total }} applicants</span>
+      {% if flagged %}<span class="chip w">{{ flagged }} with data to verify</span>{% endif %}
+      {% if quarantine %}<span class="chip w">{{ quarantine|length }} quarantined</span>{% endif %}
+    </div>
+    <div style="display:flex;gap:8px">
+      <a href="{{ url_for('review_sheet') }}"><button type="button">⬇ Review spreadsheet</button></a>
+      <a href="{{ url_for('download_summaries') }}"><button type="button">⬇ Download summaries</button></a>
+      <form action="{{ url_for('reset') }}" method="post" style="display:flex;align-items:center;gap:6px"
+            onsubmit="return confirm(this.purge_raw.checked ? 'Clear all processed students AND permanently delete raw uploaded files?' : 'Clear all processed students and start fresh?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label class="muted" style="font-weight:normal;display:flex;align-items:center;gap:4px" title="Also permanently delete the original uploaded CSV/ZIP/document files, not just the derived records">
+          <input type="checkbox" name="purge_raw" value="1"> also delete raw uploads
+        </label>
+        <button type="submit" class="danger">Clear all</button>
+      </form>
+    </div>
+  </div>
+  <p class="muted" style="margin:10px 0 0">
+    Every applicant on file, decided or not — the working views are
+    <a href="{{ url_for('triage') }}">triage</a> and
+    <a href="{{ url_for('summaries') }}">summaries</a>. The app describes; it does not score or rank.
+    {% if coverage %}
+      <br><b>Undergrad degree:</b> filled in for {{ coverage.with_degree }} of {{ coverage.total }}
+      {%- if coverage.no_packet %}; {{ coverage.no_packet }} with no packet on file{% endif %}
+      {%- if coverage.packet_no_degree %}; {{ coverage.packet_no_degree }} with a packet naming no degree{% endif %}.
+    {% endif %}
+  </p>
+
+  {% if dupes %}
+  <p class="muted" style="margin:10px 0 0">
+    <b class="warnish">Possible duplicates:</b>
+    {% for g in dupes %}{{ g[0].name }} appears under
+      {% for m in g %}<a href="{{ url_for('student', cas_id=m.cas_id) }}">{{ m.cas_id }}</a>{% if not loop.last %} and {% endif %}{% endfor %}{% if not loop.last %}; {% endif %}
+    {% endfor %}.
+    Two ids are two applications as far as the store is concerned — usually the roster
+    and the packet filename disagree. Nothing is merged automatically; fix the id in the
+    source and re-upload, or read them as one.
+  </p>
+  {% endif %}
+
+  <div class="filters" id="appfilters">
+    <input type="search" placeholder="Search name, id, programme or area…" aria-label="Search applicants">
+    <div class="seg">
+      <button type="button" data-status="all" class="on">All</button>
+      <button type="button" data-status="tbd">tbd</button>
+      <button type="button" data-status="accept">accept</button>
+      <button type="button" data-status="reject">reject</button>
+    </div>
+    <div class="seg">
+      <button type="button" data-sort="name" class="on">A–Z</button>
+      <button type="button" data-sort="gpa">GPA</button>
+    </div>
+  </div>
+  <p class="empty-note">Nothing matches that filter.</p>
+  {% if pages > 1 %}
+  <p class="muted" style="margin:8px 0 0">Showing page {{ page }} of {{ pages }} —
+     the search and filters above apply to this page. Use them after narrowing with
+     <a href="{{ url_for('triage') }}">triage</a> if you're hunting one applicant.</p>
+  {% endif %}
+</div>
+
+{% for s in summaries %}
+{% set m = s.metrics or {} %}
+{% set gpa = m.get('gpa4') %}
+{% set lor = m.get('lor_avg') %}
+<div class="card applicant"
+     data-search="{{ s.name }} {{ s.cas_id }} {{ (s.programs or [])|join(' ') }} {{ (m.get('areas') or [])|join(' ') }} {{ s.review_status }}"
+     data-status="{{ s.review_status }}"
+     data-name="{{ s.name }}"
+     data-gpa="{{ '%.2f'|format(gpa) if gpa is not none else '' }}">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+    <h3 style="margin:0">
+      <a href="{{ url_for('student', cas_id=s.cas_id) }}">{{ s.name }}</a>
+      <span class="muted" style="font-weight:400;font-size:13px">· {{ s.cas_id }}</span>
+    </h3>
+    <div style="display:flex;gap:6px;align-items:center">
+      {% if s.review_status %}<span class="chip d-{{ s.review_status }}">{{ s.review_status }}</span>{% endif %}
+      {% if s.triage %}<span class="chip">swiped: {{ s.triage }}</span>{% endif %}
+      {% if dupe_ids.get(s.cas_id) %}<span class="chip w"
+        title="Same name as {{ dupe_ids.get(s.cas_id)|join(', ') }}">possible duplicate</span>{% endif %}
+      {% if s.warnings %}<span class="chip w" title="{{ s.warnings|join(' • ') }}">⚠ {{ s.warnings|length }} to verify</span>{% endif %}
+    </div>
+  </div>
+
+  <div class="figs">
+    {# The figure is the spreadsheet's own number. A /4.0 conversion only
+       appears when the sheet stated a scale; otherwise it would be a guess
+       dressed as a fact, and the colour banding would inherit the guess. #}
+    {% if m.gpa_value %}
+      {% set assumed = m.get('gpa_assumed') %}
+      <span class="fig {{ '' if assumed else ('high' if gpa>=3.5 else 'mid' if gpa>=3.0 else '') }}"
+            title="{{ 'The export did not state a GPA scale, so no /4.0 conversion is shown. Set gpa.gpa_scale in config/csv_field_map.yaml if it is always the same.' if assumed else 'As stated in the source' }}">
+        <b>GPA</b> {{ m.gpa_value }}{% if not assumed and m.gpa_scale %}<i>/{{ m.gpa_scale }}</i>{% endif %}{% if assumed %} <i>scale not stated</i>{% endif %}
+      </span>
+    {% elif gpa is not none %}<span class="fig"><b>GPA</b> {{ '%.2f'|format(gpa) }}</span>{% endif %}
+    {% if m.gre %}<span class="fig"><b>GRE</b> {% if m.gre.total %}{{ m.gre.total }} <i>(V{{ m.gre.v }}/Q{{ m.gre.q }}{% if m.gre.awa is not none %}, AWA {{ m.gre.awa }}{% endif %})</i>{% else %}{{ m.gre.raw|join(', ') }}{% endif %}</span>{% endif %}
+    {% if m.toefl %}<span class="fig"><b>TOEFL</b> {{ m.toefl }}</span>{% endif %}
+    {% if m.ielts %}<span class="fig"><b>IELTS</b> {{ m.ielts }}</span>{% endif %}
+    {% if lor is not none %}<span class="fig {{ 'high' if lor>=4.0 else 'mid' if lor>=3.0 else '' }}"><b>LOR</b> ★ {{ lor }}/5 <i>· {{ m.lor_count }} letter(s)</i></span>{% elif m.lor_count %}<span class="fig"><b>LOR</b> {{ m.lor_count }} letter(s)</span>{% endif %}
+    {% if m.areas %}<span class="fig" title="{{ m.areas|join(', ') }}"><b>Areas</b> {{ m.areas|length }}</span>{% endif %}
+  </div>
+
+  <div class="chips" style="margin-top:8px">
+    {% for src in s.sources_present %}<span class="chip s">{{ src }}</span>{% endfor %}
+    {% if s.ocr and s.ocr.ocr_pages_read %}<span class="chip d-tbd">📄 OCR · {{ s.ocr.ocr_pages_read }} scanned page(s)</span>{% endif %}
+  </div>
+  {% if s.programs %}<div class="muted" style="margin-top:4px">Applied to: {{ s.programs|join('; ') }}</div>{% endif %}
+  <div style="margin-top:12px">{{ summary_card(s.summary_text) }}</div>
+</div>
+{% endfor %}
+
+{% if pages > 1 %}
+<div class="card pager">
+  {% if page > 1 %}<a href="{{ url_for('applicants', page=page-1) }}"><button type="button">← Previous</button></a>{% endif %}
+  <span class="muted">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="{{ url_for('applicants', page=page+1) }}"><button type="button">Next →</button></a>{% endif %}
+</div>
+{% endif %}
+
+<style>
+  .pager{display:flex;align-items:center;justify-content:center;gap:14px}
+  .warnish{color:var(--mid)}
+  .figs{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+  .fig{font-size:13px;padding:5px 11px;border-radius:8px;background:#eff2f8;color:#2b3446;border:1px solid var(--line)}
+  .fig b{font-weight:700;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.03em;margin-right:3px}
+  .fig i{font-style:normal;color:var(--muted);font-size:12px}
+  .fig.high{background:var(--high-bg);border-color:var(--high-line);color:var(--high)}
+  .fig.high b{color:var(--high)}
+  .fig.mid{background:var(--mid-bg);border-color:var(--mid-line);color:var(--mid)}
+  .fig.mid b{color:var(--mid)}
+</style>
+{% else %}
+<div class="card"><p class="muted">No applicants yet.
+  <a href="{{ url_for('step_upload') }}">Start at step 1</a>.</p></div>
+{% endif %}
+
+{% if quarantine %}
+<div class="card">
+  <h3 style="margin-top:0">Quarantined rows <span class="chip w">{{ quarantine|length }}</span></h3>
+  <p class="muted">These rows failed validation and could not be summarized. Fix the source data and re-upload.</p>
+  <table>
+    <thead><tr><th>Source row</th><th>ID</th><th>Reason(s)</th></tr></thead>
+    <tbody>
+      {% for q in quarantine %}
+      <tr>
+        <td class="muted">{{ q.source_row }}</td>
+        <td class="muted">{{ q.cas_id or '—' }}</td>
+        <td>{% for err in q.errors %}<span class="chip w">{{ err }}</span> {% endfor %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+
+<script>
+window.wireFilters('#appfilters', '.card.applicant');
+document.querySelectorAll('form[action$="/reset"]').forEach(function(form){
+  form.addEventListener('submit', function(ev){
+    ev.preventDefault();
+    window.postForm(form, function(){ setTimeout(() => window.location.reload(), 400); });
+  });
+});
+</script>
+{% endblock %}

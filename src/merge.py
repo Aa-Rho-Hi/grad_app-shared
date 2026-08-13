@@ -23,8 +23,10 @@ Adding a new source type later = parse it to a section dict and call
 """
 from __future__ import annotations
 
+import re
+
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 UNIFIED_SCHEMA_VERSION = "3.0.0"
 
@@ -117,13 +119,23 @@ def applicant_metrics(unified: Dict[str, Any]) -> Dict[str, Any]:
     m: Dict[str, Any] = {}
 
     # GPA (/4.0) — application transcript GPA first, else a "GPA: x/y" résumé line
+    # `gpa4` exists to sort and compare across scales — it is a conversion, and
+    # when the export never stated a scale it is a *guess* at a conversion. What
+    # gets shown is `gpa_value`: the number exactly as the spreadsheet wrote it.
+    assumed = any("GPA scale was auto-detected" in w
+                  for w in (unified.get("warnings") or []))
     gvals = [e for e in (app.get("education") or [])
              if e.get("gpa") and "normalized_4" in e["gpa"]]
     if gvals:
         best = max(gvals, key=lambda e: e["gpa"]["normalized_4"])
         m["gpa4"] = round(best["gpa"]["normalized_4"], 2)
-        if "raw" in best["gpa"] and "scale" in best["gpa"]:
-            m["gpa_raw"] = f"{best['gpa']['raw']}/{best['gpa']['scale']:.0f}"
+        raw = best["gpa"].get("raw")
+        if raw is not None:
+            m["gpa_value"] = f"{raw:g}"
+            m["gpa_assumed"] = assumed
+            if "scale" in best["gpa"]:
+                m["gpa_scale"] = f"{best['gpa']['scale']:g}"
+                m["gpa_raw"] = f"{raw:g}/{best['gpa']['scale']:g}"
     else:
         prof = ((s.get("resume") or {}).get("analysis") or {}).get("profile") or {}
         for line in prof.get("education", []):
@@ -131,12 +143,18 @@ def applicant_metrics(unified: Dict[str, Any]) -> Dict[str, Any]:
             if mm:
                 raw, scale = float(mm.group(1)), float(mm.group(2))
                 m["gpa4"] = round(min(raw / scale * 4.0, 4.0), 2) if scale else raw
+                # The résumé wrote "3.36/4.3" — the scale is stated, not guessed.
                 m["gpa_raw"] = f"{mm.group(1)}/{mm.group(2)}"
+                m["gpa_value"] = mm.group(1)
+                m["gpa_scale"] = mm.group(2)
+                m["gpa_assumed"] = False
                 break
             mm = re.search(r"gpa[:\s]*([0-4]\.\d{1,2})\b(?!\s*/)", line, re.I)
             if mm and float(mm.group(1)) <= 4.3:
                 m["gpa4"] = round(float(mm.group(1)), 2)
                 m["gpa_raw"] = f"{mm.group(1)}/4.0"
+                m["gpa_value"] = mm.group(1)
+                m["gpa_assumed"] = True      # a bare number on a résumé line
                 break
 
     # GRE — application sheet, else parsed from the packet
@@ -181,7 +199,32 @@ def sources_present(unified: Dict[str, Any]) -> List[str]:
 
 
 def _norm_name(n: str) -> str:
-    return " ".join((n or "").lower().replace(".", " ").split())
+    """Fold a name for comparison: case, punctuation and spacing all vary by
+    source. The roster writes "CHEN-NI LIU"; a packet filename gives "Chen Ni
+    Liu". Only the dot was folded before, so those two never matched and the
+    same applicant could sit in the store twice."""
+    return " ".join(re.sub(r"[^0-9a-z]+", " ", (n or "").lower()).split())
+
+
+def likely_duplicate_groups(entries: Sequence[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Records that look like the same person under different ids.
+
+    Not merged automatically: two numeric `cas_id`s are two applications as far
+    as the store is concerned, and folding them would be irreversible guesswork
+    — two people really can share a name. Flagged instead, so the reviewer sees
+    "this is the same person twice" rather than quietly reading them as two.
+    """
+    by_name: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in entries:
+        key = _norm_name(entry.get("name") or "")
+        if key:
+            by_name.setdefault(key, []).append(entry)
+    groups = []
+    for members in by_name.values():
+        ids = {m.get("cas_id") for m in members}
+        if len(ids) > 1:
+            groups.append(sorted(members, key=lambda m: str(m.get("cas_id"))))
+    return groups
 
 
 def _is_cas_id(key: str) -> bool:

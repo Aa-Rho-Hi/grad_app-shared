@@ -1,0 +1,147 @@
+{# Shared chrome for the four-step flow: the progress header, and the two
+   upload drop zones (used at step 1 and again at step 3). #}
+
+{% macro stepper(current) %}
+{% set steps = [(1, 'Upload', url_for('step_upload')),
+                (2, 'Add the degree column', url_for('step_sheet')),
+                (3, 'Upload with status', url_for('step_status')),
+                (4, 'Triage', url_for('triage'))] %}
+<div class="stepper">
+  {% for n, label, href in steps %}
+  <a class="st {{ 'on' if n == current }} {{ 'done' if n < current }}"
+     href="{{ href if n <= current else '#' }}">
+    <span class="num">{{ '✓' if n < current else n }}</span>{{ label }}
+  </a>
+  {% if not loop.last %}<span class="sep">›</span>{% endif %}
+  {% endfor %}
+</div>
+<style>
+  .stepper{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+  .stepper .st{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--muted);
+               text-decoration:none;padding:6px 12px;border-radius:999px;border:1px solid transparent}
+  .stepper .st .num{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;
+                    border-radius:50%;background:#eaeef7;color:var(--muted);font-size:11px;font-weight:700}
+  .stepper .st.on{color:var(--ink);border-color:var(--line-strong);background:#fff;box-shadow:var(--shadow)}
+  .stepper .st.on .num{background:var(--accent);color:#fff}
+  .stepper .st.done .num{background:var(--high-bg);color:var(--high)}
+  .stepper .sep{color:var(--line-strong)}
+</style>
+{% endmacro %}
+
+
+{% macro dropzones(action, csv_label, csv_hint, button, csv_required=false) %}
+<form id="upform" action="{{ action }}" method="post" enctype="multipart/form-data">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <div class="dz-grid">
+    <label class="dz" id="dropCsv" for="fileInput">
+      <div class="dz-ic">▦</div>
+      <div class="dz-t">{{ csv_label }}</div>
+      <div class="dz-s">{{ csv_hint }}</div>
+      <span id="fname" class="chip">No file selected</span>
+    </label>
+    <input id="fileInput" type="file" name="csv" accept=".csv,.xlsx,.xls,.xlsm" hidden>
+
+    <label class="dz" id="dropZip" for="zipInput">
+      <div class="dz-ic">🗂</div>
+      <div class="dz-t">Application packets</div>
+      <div class="dz-s">A ZIP, or the PDFs themselves</div>
+      <span id="zname" class="chip">No file selected</span>
+    </label>
+    <input id="zipInput" type="file" name="zip" accept=".zip,.pdf" multiple hidden>
+  </div>
+
+  <div class="dz-actions">
+    <button type="submit" class="primary">{{ button }}</button>
+    <span class="muted" id="dz-note"></span>
+  </div>
+
+  <div id="prog" style="display:none;margin-top:16px">
+    <div class="bar" style="height:10px"><i id="prog-fill" style="width:0%;background:var(--accent)"></i></div>
+    <div style="display:flex;justify-content:space-between;gap:12px;margin-top:7px">
+      <span class="muted" id="prog-label">Starting…</span>
+      <span class="muted" id="prog-count"></span>
+    </div>
+  </div>
+</form>
+
+<style>
+  .dz-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:640px){.dz-grid{grid-template-columns:1fr}}
+  .dz{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;
+      border:2px dashed var(--line-strong);border-radius:12px;padding:22px 16px;cursor:pointer;
+      background:#fbfcff;transition:.15s}
+  .dz:hover{border-color:var(--muted);background:#f7f9ff}
+  .dz.over{border-color:var(--accent);background:var(--accent-bg)}
+  .dz.set{border-style:solid;border-color:var(--high-line);background:var(--high-bg)}
+  .dz-ic{font-size:22px;line-height:1}
+  .dz-t{font-size:15px;font-weight:700;color:var(--ink)}
+  .dz-s{font-size:12px;color:var(--muted)}
+  .dz .chip{margin-top:4px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dz-actions{display:flex;align-items:center;gap:14px;margin-top:16px;flex-wrap:wrap}
+  button.primary{font-size:15px;padding:11px 28px}
+</style>
+
+<script>
+(function(){
+  const form=document.getElementById('upform');
+  const csvRequired = {{ 'true' if csv_required else 'false' }};
+  function wire(zoneId, inputId, labelId){
+    const zone=document.getElementById(zoneId), inp=document.getElementById(inputId),
+          lab=document.getElementById(labelId);
+    function show(){
+      const n = inp.files.length;
+      if(n){ lab.textContent = n === 1 ? inp.files[0].name : n + ' files selected';
+             zone.classList.add('set'); }
+      else { lab.textContent='No file selected'; zone.classList.remove('set'); }
+    }
+    inp.addEventListener('change', show);
+    ['dragenter','dragover'].forEach(e=>zone.addEventListener(e,ev=>{ev.preventDefault();zone.classList.add('over');}));
+    ['dragleave','dragend'].forEach(e=>zone.addEventListener(e,ev=>{ev.preventDefault();zone.classList.remove('over');}));
+    zone.addEventListener('drop',ev=>{ ev.preventDefault(); zone.classList.remove('over');
+      if(ev.dataTransfer.files.length){ inp.files=ev.dataTransfer.files; show(); }});
+  }
+  wire('dropCsv','fileInput','fname');
+  wire('dropZip','zipInput','zname');
+  const btn=form.querySelector('button[type=submit]');
+  const prog=document.getElementById('prog'), fill=document.getElementById('prog-fill'),
+        plabel=document.getElementById('prog-label'), pcount=document.getElementById('prog-count'),
+        note=document.getElementById('dz-note');
+
+  // Poll the background job so a five-minute OCR run says what it's doing
+  // instead of showing a frozen page.
+  function follow(jobId){
+    fetch('/jobs/' + jobId).then(r => r.json()).then(j => {
+      fill.style.width = (j.percent || 0) + '%';
+      plabel.textContent = j.label || 'Working…';
+      pcount.textContent = j.total ? (j.count + ' of ' + j.total) : '';
+      if (!j.done) return setTimeout(() => follow(jobId), 600);
+      if (j.error){ window.toast(j.error, 'bad'); btn.disabled=false; btn.textContent='Try again';
+                    prog.style.display='none'; return; }
+      fill.style.width='100%'; plabel.textContent='Done'; pcount.textContent='';
+      if (j.message) window.toast(j.message, 'good');
+      setTimeout(() => { window.location = j.next || window.location.pathname; }, 550);
+    }).catch(() => { window.toast('Lost track of that upload — reload the page', 'bad');
+                     btn.disabled = false; });
+  }
+
+  form.addEventListener('submit',ev=>{
+    const csv=document.getElementById('fileInput'), zip=document.getElementById('zipInput');
+    if(csvRequired && !csv.files.length){
+      ev.preventDefault(); window.toast('Choose the spreadsheet with the status column filled in', 'bad'); return; }
+    if(!csv.files.length && !zip.files.length){
+      ev.preventDefault(); window.toast('Choose a spreadsheet, packets, or both', 'bad'); return; }
+
+    ev.preventDefault();
+    btn.disabled = true; btn.textContent = 'Working…';
+    note.textContent = 'Everything runs on this machine.';
+    prog.style.display = 'block';
+    fetch(form.action, {method:'POST', headers:{'X-Requested-With':'fetch'},
+                        body: new FormData(form)})
+      .then(r => r.json())
+      .then(d => d.job ? follow(d.job) : (window.location = '/'))
+      .catch(() => { window.toast('Upload failed — reload and try again', 'bad');
+                     btn.disabled=false; btn.textContent='{{ button }}'; });
+  });
+})();
+</script>
+{% endmacro %}

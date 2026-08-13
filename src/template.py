@@ -1,15 +1,54 @@
 """Stage 5 — deterministic descriptive summary. No LLM, no scoring.
 
-Renders a detailed, sectioned profile of an applicant: academic standing,
-research interests, factual highlights ("strengths"), and the applicant's own
-stated motivation (quoted from the SOP, never interpreted). Every line is
-derived from data already present; nothing is invented or judged.
+Renders a *scannable card* per applicant: a three-line header (identity, the
+numbers, the program applied to), then short headed sections — Background,
+Experience, Projects, Notable, In their words, Letters, On file, Verify. Every
+line is derived from data already present; nothing is invented or judged.
+
+Design note: an earlier version packed each section onto one `- Label: a; b; c`
+line, which turned a résumé's four experience bullets into a semicolon-joined
+paragraph nobody could skim. Sections now carry one item per line, so a reviewer
+working through hundreds of applicants can find a section by its heading and
+read its items as a list. Each item still carries enough text to state a full
+claim rather than a fragment — see EXCERPT/QUOTE below. Source sentences are
+clipped, never paraphrased, and the full document text stays in the record for
+anyone who wants it.
+
+Output contract (parsed by templates/_summary.html, and valid Markdown so the
+.md download renders as a document — `##` there is the applicant name, so
+sections sit at `###`):
+
+    <name> · <email>                     <- block 1, line 1
+    GPA … · GRE … · 3 LOR(s), avg …/5    <- block 1, line 2
+    Applied: <program> — <status>        <- block 1, line 3 (optional)
+
+    ### Background                       <- one block per section
+    - <item>
+    - <Label>: <item>
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
 
 from .analyze import motivation_sentences
+
+# Clip budgets (characters). Long enough to carry a full claim from the source
+# sentence — a résumé bullet that stops at "in order to obtain better" has told
+# the reviewer nothing. The full document text is always in the record too, so
+# these can be raised again without losing anything but scannability.
+EXCERPT = 320
+QUOTE = 460
+
+# A resume "education" line worth showing states a credential. Anything else in
+# that block is objective statements, header junk, or GPA (already in the facts
+# strip), so it is dropped rather than clipped.
+# "B.E." must keep its dots: the undotted form matched the word "be", so an
+# objective statement ("...and be a part of a renowned university") passed as a
+# credential and landed in Background.
+_DEGREE_RE = re.compile(
+    r"\b(bachelor|master|doctor|b\.?s\.?c?|m\.?s\.?c?|b\.?tech|m\.?tech|b\.e\.?|"
+    r"b\.?eng|m\.?eng|ph\.?\s?d|diploma|major(?:ed)? in)\b", re.I)
 
 
 def _name(rec: dict) -> str:
@@ -51,276 +90,254 @@ def _profile(doc: dict | None) -> dict:
     return _analysis(doc).get("profile") or {}
 
 
-def _phr(label: str, items: List[str], limit: int = 3) -> str:
-    vals = [str(x).strip().rstrip(".") for x in (items or []) if str(x).strip()]
-    if not vals:
-        return ""
-    return f"{label}: " + "; ".join(vals[:limit]) + "."
+def _clip(text: Any, limit: int) -> str:
+    """Collapse whitespace and cut to `limit` chars on a word boundary."""
+    s = " ".join(str(text or "").split()).rstrip(" .…")
+    if len(s) <= limit:
+        return s
+    return s[:limit].rsplit(" ", 1)[0].rstrip(" ,;:—-") + "…"
+
+
+def _items(values, count: int, limit: int = EXCERPT) -> List[str]:
+    """Clip the first `count` non-empty entries of a profile list."""
+    out = []
+    for v in (values or []):
+        c = _clip(v, limit)
+        if c and c not in out:
+            out.append(c)
+        if len(out) >= count:
+            break
+    return out
+
+
+def _bullets(items: List[str]) -> List[str]:
+    """One item per line — the whole point of the section layout."""
+    return [f"- {i}" for i in items if i]
+
+
+def _labeled(label: str, items: List[str], sep: str = ", ") -> List[str]:
+    """A single bullet whose items read as one phrase (areas, skills, files)."""
+    return [f"- {label}: " + sep.join(items)] if items else []
+
+
+def _grouped(label: str, items: List[str]) -> List[str]:
+    """Label the first item, then let the rest stand as their own bullets.
+
+    Repeating "Fit:" on every line reads like three separate findings; labeling
+    once and continuing the list keeps them visibly part of one answer.
+    """
+    if not items:
+        return []
+    return [f"- {label}: {items[0]}"] + [f"- {i}" for i in items[1:]]
+
+
+def _section(title: str, lines: List[str]) -> str:
+    """A heading plus its lines, or nothing at all if the section is empty."""
+    lines = [ln for ln in lines if ln]
+    return "\n".join([f"### {title}"] + lines) if lines else ""
+
+
+def _gpa_bit(rec: dict, resume_gpa_lines: List[str]) -> str:
+    best = _best_gpa(rec)
+    if best:
+        g = best[1]
+        # Show the number the spreadsheet actually holds. The /4.0 conversion
+        # is only as good as the scale, and when the export never stated one
+        # the scale was inferred from the magnitude — printing "3.8/4.0" for a
+        # value that might be out of 5 states a fact the data doesn't support.
+        assumed = any("GPA scale was auto-detected" in w
+                      for w in (rec.get("meta", {}).get("warnings") or []))
+        if assumed:
+            return f"GPA {g['raw']:g} (scale not stated in the sheet)"
+        if abs(g["scale"] - 4.0) < 0.01:
+            return f"GPA {g['raw']:g}/4.0"
+        return f"GPA {g['raw']:g}/{g['scale']:g} (≈{g['normalized_4']}/4.0)"
+    if resume_gpa_lines:
+        return "GPA per resume only — " + _clip(resume_gpa_lines[0], 70)
+    return "no GPA on file"
+
+
+def _test_bits(rec: dict, docs: dict) -> tuple[List[str], bool]:
+    """Structured test scores first; packet-parsed figures fill gaps, marked
+    "(parsed)" so the reviewer verifies them against official records."""
+    eng = rec.get("english_proficiency", {})
+    bits: List[str] = []
+    if "best_ielts_overall" in eng:
+        bits.append(f"IELTS {eng['best_ielts_overall']}")
+    if "best_toefl_total" in eng:
+        bits.append(f"TOEFL {eng['best_toefl_total']:.0f}")
+    if rec.get("gre_results"):
+        vals = ", ".join(str(int(v)) if float(v).is_integer() else str(v)
+                         for v in rec["gre_results"])
+        ok = any(260 <= float(v) <= 340 for v in rec["gre_results"])
+        bits.append(f"GRE {vals}" if ok else f"GRE {vals} (⚠ not a valid 260–340 total)")
+
+    ts = _analysis(docs.get("scores")).get("test_scores") or {}
+    parsed = False
+    if "best_ielts_overall" not in eng and "ielts_overall" in ts:
+        bits.append(f"IELTS {ts['ielts_overall']} (parsed)"); parsed = True
+    if "best_toefl_total" not in eng and "toefl_total" in ts:
+        bits.append(f"TOEFL {ts['toefl_total']} (parsed)"); parsed = True
+    if not rec.get("gre_results") and ("gre_verbal" in ts or "gre_quant" in ts):
+        sub = []
+        if "gre_verbal" in ts:
+            sub.append(f"V{ts['gre_verbal']}")
+        if "gre_quant" in ts:
+            sub.append(f"Q{ts['gre_quant']}")
+        if "gre_awa" in ts:
+            sub.append(f"AWA {ts['gre_awa']}")
+        head = f"GRE {ts['gre_total']}" if "gre_total" in ts else "GRE"
+        bits.append(f"{head} ({'/'.join(sub)}, parsed)"); parsed = True
+    return bits, parsed
+
+
+def _roster(lors_all: List[dict]) -> List[str]:
+    """Every named recommender: Likert reviewers ∪ letter-only writers."""
+    roster = next((l.get("recommenders") for l in lors_all if l.get("recommenders")), None)
+    if not roster:
+        evaluators = next((l.get("likert", {}).get("evaluators")
+                           for l in lors_all if l.get("likert")), None) or []
+        roster = [e.get("evaluator") for e in evaluators if e.get("evaluator")]
+    if not roster:
+        roster = [l.get("recommender") for l in lors_all if l.get("recommender")]
+    return list(roster or [])
 
 
 def render(rec: Dict[str, Any]) -> str:
     name = _name(rec)
     docs = rec.get("_documents") or {}
-    resume = docs.get("resume")
+    resume, sop = docs.get("resume"), docs.get("sop")
+    lors_all = docs.get("lors") or []
     resume_prof = _profile(resume)
-    resume_profile_lines = [ln for vals in resume_prof.values() if isinstance(vals, list)
-                            for ln in vals]
-    resume_gpa_lines = [ln for ln in resume_profile_lines if "gpa" in ln.lower()]
-    resume_test_lines = resume_prof.get("test_scores", [])
-    paras: List[str] = []
+    resume_lines = [ln for vals in resume_prof.values() if isinstance(vals, list) for ln in vals]
+    resume_gpa_lines = [ln for ln in resume_lines if "gpa" in ln.lower()]
 
-    # ---- Overview ----
-    p1 = [name]
+    roster = _roster(lors_all)
+    likert = next((l.get("likert") for l in lors_all if l.get("likert")), None)
+    n_lor = len(roster) or len(lors_all)
+
+    # ---- Facts strip: the numbers a reviewer scans for ----
+    facts = [_gpa_bit(rec, resume_gpa_lines)]
+    tests, parsed_used = _test_bits(rec, docs)
+    if tests:
+        facts.append(", ".join(tests))
+    elif resume_test_lines := resume_prof.get("test_scores", []):
+        facts.append("tests per resume only — " + _clip(resume_test_lines[0], 70))
+    else:
+        facts.append("no test scores on file")
+    if n_lor:
+        lor_bit = f"{n_lor} LOR(s)"
+        if likert and likert.get("overall_average") is not None:
+            lor_bit += f", avg {likert['overall_average']}/5"
+        facts.append(lor_bit)
     email = rec.get("personal", {}).get("email")
-    if email:
-        p1[0] += f" ({email})"
+
+    # ---- Header: who, the numbers, the program. One idea per line. ----
+    head: List[str] = [" · ".join([name] + ([email] if email else []))]
+    if facts:
+        head.append(" · ".join(facts))
     progs = rec.get("programs", [])
     if progs:
-        p1.append(f"applied to {len(progs)} program(s); primary: {progs[0].get('name', 'n/a')}.")
+        line = f"Applied: {progs[0].get('name', 'n/a')}"
+        if len(progs) > 1:
+            line += f" (+{len(progs) - 1} more)"
         if progs[0].get("status"):
-            p1.append(f"Recorded status: {progs[0]['status']}.")
-    paras.append(" ".join(p1))
+            line += f" — status: {progs[0]['status']}"
+        head.append(line)
+    paras: List[str] = ["\n".join(head)]
 
-    # ---- Academic standing ----
-    a = ["Academic standing —"]
-    best = _best_gpa(rec)
-    edu = rec.get("education", [])
-    if best:
-        nm, g = best
-        a.append(f"strongest transcript GPA {g['raw']} on a {g['scale']:.0f}-point scale "
-                 f"(≈{g['normalized_4']}/4.0) from {nm}.")
-    elif resume_gpa_lines:
-        a.append("no transcript GPA in the application data, but the resume mentions: "
-                 + "; ".join(resume_gpa_lines[:2]) + ".")
+    # ---- Background: where they studied, in what, on what topics ----
+    # Structured institutions are authoritative; the resume fills in the degree.
+    insts = [e.get("college_name") for e in rec.get("education", []) if e.get("college_name")]
+    seen = re.sub(r"\W+", "", " ".join(insts)).lower()
+    degrees = [d for d in _items(
+        [e for e in resume_prof.get("education", []) if _DEGREE_RE.search(str(e))], 3, 140)
+        if re.sub(r"\W+", "", d).lower() not in seen]
+    bg: List[str] = []
+    if insts:
+        bg.append(" — ".join([", ".join(insts[:3])] + degrees))
     else:
-        a.append("no transcript GPA on file.")
-    insts = [e.get("college_name") for e in edu if e.get("college_name")]
-    if len(insts) > 1:
-        a.append("Institutions: " + "; ".join(insts) + ".")
-    eng = rec.get("english_proficiency", {})
-    tests = []
-    if "best_ielts_overall" in eng:
-        tests.append(f"IELTS {eng['best_ielts_overall']}")
-    if "best_toefl_total" in eng:
-        tests.append(f"TOEFL {eng['best_toefl_total']:.0f}")
-    if rec.get("gre_results"):
-        gre_vals = ", ".join(str(int(v)) if float(v).is_integer() else str(v)
-                             for v in rec["gre_results"])
-        valid_total = any(260 <= float(v) <= 340 for v in rec["gre_results"])
-        tests.append(f"GRE {gre_vals} (of 340)" if valid_total
-                     else f"GRE {gre_vals} (reported; flagged — not a valid 260–340 total)")
-    # Application sheet is authoritative; packet-parsed figures fill gaps, marked
-    # "(parsed)" so the reviewer verifies them against official records.
-    ts = ((docs.get("scores") or {}).get("analysis") or {}).get("test_scores") or {}
-    parsed_used = False
-    if "best_ielts_overall" not in eng and "ielts_overall" in ts:
-        tests.append(f"IELTS {ts['ielts_overall']} (parsed)"); parsed_used = True
-    if "best_toefl_total" not in eng and "toefl_total" in ts:
-        tests.append(f"TOEFL {ts['toefl_total']} (parsed)"); parsed_used = True
-    if not rec.get("gre_results") and ("gre_verbal" in ts or "gre_quant" in ts):
-        g = []
-        if "gre_verbal" in ts:
-            g.append(f"V{ts['gre_verbal']}")
-        if "gre_quant" in ts:
-            g.append(f"Q{ts['gre_quant']}")
-        if "gre_awa" in ts:
-            g.append(f"AWA {ts['gre_awa']}")
-        tot = f" ({ts['gre_total']} V+Q)" if "gre_total" in ts else ""
-        tests.append("GRE " + "/".join(g) + tot + " (parsed)"); parsed_used = True
-    if tests:
-        a.append("Test scores: " + ", ".join(tests) + ".")
-    elif resume_test_lines:
-        a.append("Test scores: none in structured fields, but the resume mentions: "
-                 + "; ".join(resume_test_lines[:2]) + ".")
-    else:
-        a.append("Test scores: none on file.")
-    paras.append(" ".join(a))
+        bg += degrees
 
-    # ---- Research interests & direction ----
-    interests = rec.get("interests", {})
-    stated = (interests.get("specialization") or []) + (interests.get("areas") or [])
-    detected = _doc_areas(rec)
-    skills = _doc_skills(rec)
-    ri = ["Research interests —"]
-    if stated:
-        ri.append("stated area(s): " + ", ".join(sorted(set(stated))) + ".")
+    stated = sorted(set((rec.get("interests", {}).get("specialization") or [])
+                        + (rec.get("interests", {}).get("areas") or [])))
+    detected = [d for d in _doc_areas(rec) if d not in stated]
+    areas = list(stated)
     if detected:
-        ri.append("areas evident in the resume/SOP (keyword detection): " + ", ".join(detected) + ".")
-    if skills:
-        ri.append("technical skills/tools mentioned: " + ", ".join(skills) + ".")
-    if len(ri) == 1:
-        ri.append("no clear research area found in the available materials.")
-    paras.append(" ".join(ri))
+        areas.append(("also " if stated else "") + ", ".join(detected[:8])
+                     + " (keyword-detected)")
+    skills = _doc_skills(rec)
+    # A résumé's own "Skills: Python, Matlab…" line lands in technical
+    # preparation, and the detected-skills line above already says it — printing
+    # both put the same list on screen twice. Keep the preparation items that
+    # add something (software, certifications, coursework).
+    prep = [p for p in _items(resume_prof.get("technical_preparation", []), 4)
+            if not re.match(r"^\s*skills?\b\s*[:\-–]", p, re.I)]
+    background = (_bullets(bg) + _labeled("Areas", areas, "; ")
+                  + _labeled("Skills", skills[:16]) + _bullets(prep[:3]))
 
-    # ---- Application materials detail ----
-    if resume:
-        rp = resume_prof
-        bits = [
-            _phr("education/training", rp.get("education", []), 3),
-            _phr("technical preparation", rp.get("technical_preparation", []), 3),
-            _phr("experience", rp.get("experience", []), 5),
-            _phr("projects or applied work", rp.get("projects", []), 4),
-            _phr("distinctions", rp.get("distinctions", []), 3),
-        ]
-        body = " ".join(b for b in bits if b)
-        if body:
-            paras.append("Resume detail — " + body)
-        else:
-            paras.append("Resume detail — resume text was captured, but no confident "
-                         "education, experience, project, or skill lines were extracted.")
+    exp = _items(resume_prof.get("experience", []), 6)
+    if not exp and resume:
+        exp = ["resume captured, but no confident experience lines extracted"]
+    projects = _items(resume_prof.get("projects", []), 4)
+    notable = _items(resume_prof.get("distinctions", []), 4)
 
-    sop = docs.get("sop")
+    # ---- In their words: quoted, never interpreted. The old "SOP detail" and
+    # "Motivation" blocks overlapped heavily, so the quoted goal and the parsed
+    # fit/direction lines are kept distinct here instead. ----
+    words: List[str] = []
     if sop and sop.get("text"):
-        sp = _profile(sop)
-        # NB: stated goals are quoted in the dedicated "Motivation" paragraph
-        # below, so they are intentionally omitted here to avoid repeating the
-        # same sentences twice per applicant.
-        bits = [
-            _phr("preparation described", sp.get("preparation", []), 3),
-            _phr("program fit mentioned", sp.get("program_fit", []), 2),
-            _phr("career direction", sp.get("career_direction", []), 2),
-        ]
-        body = " ".join(b for b in bits if b)
-        if body:
-            paras.append("SOP detail — " + body)
-        else:
-            paras.append("SOP detail — SOP text was captured, but the parser did not find "
-                         "clear goal, preparation, or program-fit sentences.")
-
-    lors_all = docs.get("lors") or []
-    likert = next((l.get("likert") for l in lors_all if l.get("likert")), None)
-    evaluators = (likert or {}).get("evaluators") or []
-    # roster = every named recommender (Likert reviewers ∪ letter-only writers)
-    roster = next((l.get("recommenders") for l in lors_all if l.get("recommenders")), None)
-    if not roster:
-        roster = [e.get("evaluator") for e in evaluators if e.get("evaluator")]
-    if not roster:
-        roster = [l.get("recommender") for l in lors_all if l.get("recommender")]
-    n_lor = len(roster) if roster else len(lors_all)
-    # narrative excerpts pulled from the actual letters (across all LOR pages)
-    evidence: List[str] = []
-    for lor in lors_all:
-        for e in _profile(lor).get("evidence", []):
-            if e not in evidence:
-                evidence.append(e)
-    if roster or lors_all:
-        if roster:
-            line = (f"Recommendation detail — {n_lor} reference letter(s) "
-                    f"from {', '.join(roster)}.")
-            if evaluators and len(roster) > len(evaluators):
-                line += (f" {len(evaluators)} submitted the CAS rating form; "
-                         f"the remainder wrote a letter only.")
-        else:
-            line = (f"Recommendation detail — {len(lors_all)} letter(s) on file, "
-                    f"but recommender names were not parsed.")
-        if evidence:
-            line += (" Excerpts from the letters: "
-                     + " ".join(f"“{e.rstrip('.')}.”" for e in evidence[:4]))
-        paras.append(line)
-
-    # ---- Highlights ("strengths") — factual, threshold-based, not a verdict ----
-    hi: List[str] = []
-    if best and best[1]["normalized_4"] >= 3.7:
-        hi.append(f"excellent GPA (≈{best[1]['normalized_4']}/4.0)")
-    elif best and best[1]["normalized_4"] >= 3.3:
-        hi.append(f"strong GPA (≈{best[1]['normalized_4']}/4.0)")
-    if eng.get("best_ielts_overall", 0) >= 7 or eng.get("best_toefl_total", 0) >= 100:
-        hi.append("English score at/above the typical bar")
-    if len(detected) >= 2:
-        hi.append(f"document text touches {len(detected)} research-area keyword groups")
-    if len(skills) >= 4:
-        hi.append(f"a broad technical toolset ({len(skills)} tools cited)")
-    if resume:
-        hi.append("a resume on file detailing experience")
-    if n_lor:
-        hi.append(f"{n_lor} letter(s) of recommendation")
-    if hi:
-        paras.append("Highlights from the data: " + "; ".join(hi) + ".")
-
-    review_notes = []
-    if resume and sop and lors_all:
-        review_notes.append("core narrative materials are present: resume, SOP, and at least one LOR.")
-    else:
-        missing = []
-        if not resume:
-            missing.append("resume")
-        if not sop:
-            missing.append("SOP")
-        if not lors_all:
-            missing.append("LOR")
-        if missing:
-            review_notes.append(" and ".join(missing) + " material is missing or was not identified.")
-    if not best and not resume_gpa_lines:
-        review_notes.append("academic performance cannot be evaluated from GPA in the parsed data.")
-    if not tests and not resume_test_lines:
-        review_notes.append("standardized-test evidence is absent from parsed fields.")
-    if review_notes:
-        paras.append("Review notes — " + " ".join(review_notes))
-
-    # ---- Motivation (in the applicant's own words; quoted, not interpreted) ----
-    if sop and sop.get("text"):
-        quotes = motivation_sentences(sop["text"])
+        sop_prof = _profile(sop)
+        quotes = motivation_sentences(sop["text"], k=3) or sop_prof.get("goals") or []
         if quotes:
-            body = " ".join(f"“{q}”" for q in quotes)
-            paras.append("Motivation, in their own words (quoted from the SOP, not interpreted): " + body)
+            words += _grouped("Goal", [f"“{_clip(q, QUOTE)}”" for q in quotes[:3]])
         else:
-            paras.append("Motivation: an SOP is on file, but no explicit goal/motivation "
-                         "statements were detected to quote.")
-    else:
-        paras.append("Motivation: no statement of purpose on file to draw from.")
+            words.append("- Goal: SOP on file; no explicit goal sentence detected")
+        words += _grouped("Fit", _items(sop_prof.get("program_fit", []), 3))
+        words += _grouped("Direction", _items(sop_prof.get("career_direction", []), 3))
 
-    # ---- Reference (LOR) ratings — CAS 1–5 Likert, averaged ----
-    lors_all = docs.get("lors") or []
-    likert = next((l.get("likert") for l in lors_all if l.get("likert")), None)
-    if likert and likert.get("count"):
-        evs = likert["evaluators"]
-        per = "; ".join(
-            f"{e.get('evaluator') or 'evaluator ' + str(i + 1)} {e['average']}/5"
-            for i, e in enumerate(evs))
-        line = (f"Reference ratings (CAS 1–5 Likert: Average=1 … Exceptional=5) — "
-                f"{likert['count']} evaluator(s): {per}.")
-        if likert.get("overall_average") is not None:
-            line += f" Overall average {likert['overall_average']}/5."
-        recs = [e.get("recommendation") for e in evs if e.get("recommendation")]
+    letters: List[str] = []
+    if roster or lors_all:
+        who = ", ".join(roster) if roster else "recommender names not parsed"
+        recs = sorted({e.get("recommendation") for e in (likert or {}).get("evaluators", [])
+                       if e.get("recommendation")})
         if recs:
-            uniq = sorted(set(recs))
-            # capitalize each distinct phrase (e.g. "I highly recommend" / "I recommend")
-            shown = [p[:1].upper() + p[1:] for p in uniq]
-            if len(uniq) == 1:
-                allword = "all " if len(recs) > 1 else ""
-                line += f" Recommendation: {allword}“{shown[0]}.”"
-            else:
-                line += " Recommendations vary: " + "; ".join(f"“{s}”" for s in shown) + "."
-        paras.append(line)
+            shown = "; ".join(f"“{r[:1].upper() + r[1:]}”" for r in recs)
+            who += " — " + ("all " if len(recs) == 1 and n_lor > 1 else "") + shown
+        evidence: List[str] = []
+        for lor in lors_all:
+            evidence += _profile(lor).get("evidence", [])
+        letters = _bullets([who] + [f"“{e}”" for e in _items(evidence, 5)])
 
     # ---- Documents on file ----
-    scores_doc = docs.get("scores")
     doc_bits = []
     if resume:
-        doc_bits.append(f"resume ({resume.get('word_count', 0)} words)")
+        doc_bits.append(f"resume {resume.get('word_count', 0)}w")
     if sop:
-        doc_bits.append(f"SOP ({sop.get('word_count', 0)} words)")
-    lors = docs.get("lors") or []
-    if roster:                           # union roster = true recommender count
-        doc_bits.append(f"{n_lor} LOR(s) from " + ", ".join(roster))
-    elif lors:
-        doc_bits.append(f"{len(lors)} LOR(s)")
-    if scores_doc:
-        doc_bits.append(f"score report/transcript ({scores_doc.get('word_count', 0)} words)")
-    if doc_bits:
-        paras.append("Documents on file: " + ", ".join(doc_bits) + ".")
+        doc_bits.append(f"SOP {sop.get('word_count', 0)}w")
+    # LOR count is already in the header; repeating the page-group count here
+    # only invited "3 LORs vs 1 LOR" confusion.
+    if docs.get("scores"):
+        doc_bits.append(f"scores/transcript {docs['scores'].get('word_count', 0)}w")
+    ocr = rec.get("_ocr") or {}
+    if ocr.get("ocr_pages_read"):
+        doc_bits.append(f"{ocr['ocr_pages_read']} page(s) read by OCR — minor errors possible")
 
-    ocr = rec.get("_ocr")
-    if ocr and ocr.get("ocr_pages_read"):
-        paras.append(f"Note: this packet was partly scanned — {ocr['ocr_pages_read']} "
-                     f"page(s) were read with OCR (text may contain minor recognition errors).")
-
-    # ---- Data to verify ----
+    # ---- Data to verify (incl. missing materials) ----
     warns = list(rec.get("meta", {}).get("warnings") or [])
+    missing = [lbl for lbl, present in
+               (("resume", resume), ("SOP", sop), ("LOR", lors_all)) if not present]
+    if missing:
+        warns.append(" and ".join(missing) + " missing or not identified.")
     if parsed_used:
-        warns.append("Some test scores were parsed from the packet — verify against "
-                     "official records.")
-    if warns:
-        paras.append("Data to verify: " + " ".join(warns))
+        warns.append("Some scores parsed from the packet — check official records.")
 
-    return "\n\n".join(paras)
+    paras += [_section("Background", background),
+              _section("Experience", _bullets(exp)),
+              _section("Projects", _bullets(projects)),
+              _section("Notable", _bullets(notable)),
+              _section("In their words (SOP)", words),
+              _section("Letters", letters),
+              _section("On file", _bullets([" · ".join(doc_bits)])),
+              _section("Verify", _bullets([_clip(w, 200) for w in warns]))]
+    return "\n\n".join(p for p in paras if p)

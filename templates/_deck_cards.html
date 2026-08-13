@@ -1,0 +1,36 @@
+{# One batch of deck cards. Rendered inline on first load and again by
+   /triage/cards when the browser runs low, so the markup lives in exactly one
+   place and a change to the card can't drift between the two paths. #}
+{% from "_summary.html" import summary_card %}
+{% for c in cards %}
+<article class="tcard" data-cas="{{ c.cas_id }}">
+  <div class="tcard-head">
+    <div>
+      <h3 style="margin:0"><a href="{{ url_for('student', cas_id=c.cas_id) }}" target="_blank" rel="noopener">{{ c.name }}</a></h3>
+      <span class="muted" style="font-size:12px">{{ c.cas_id }}</span>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center">
+      {% if c.warnings %}<span class="chip w" title="{{ c.warnings|join(' • ') }}">⚠ {{ c.warnings|length }}</span>{% endif %}
+      {% for src in c.sources_present %}<span class="chip s">{{ src }}</span>{% endfor %}
+    </div>
+  </div>
+  <div class="tcard-scroll">
+    <div class="tcard-body">{{ summary_card(c.card_text) }}</div>
+    <div class="tcard-fade"></div>
+  </div>
+  {% if professors %}
+  <div class="tcard-foot">
+    <label for="prof-{{ c.cas_id }}">Send to</label>
+    <select id="prof-{{ c.cas_id }}" class="prof-pick">
+      <option value="">— decide later —</option>
+      {% for p in professors %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+    </select>
+    <span class="muted" style="font-size:12px">applies when you shortlist; changeable later</span>
+  </div>
+  {% endif %}
+  <div class="wash yes"></div>
+  <div class="wash no"></div>
+  <div class="stamp yes">Shortlist</div>
+  <div class="stamp no">Reject</div>
+</article>
+{% endfor %}

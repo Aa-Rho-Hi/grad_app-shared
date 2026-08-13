@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+{% from "_summary.html" import summary_card %}
+{% from "_wizard.html" import stepper %}
+{% block title %}Triage — Grad App{% endblock %}
+{% block body %}
+
+{{ stepper(4) }}
+
+<p class="back"><a href="{{ url_for('applicants') }}">All applicants</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('triage_shortlist') }}">Shortlist ({{ shortlist_count }})</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Professor queues</a></p>
+
+{% if cards %}
+<div class="deck-head">
+  <div>
+    <h3 style="margin:0">Triage</h3>
+    <p class="muted" style="margin:2px 0 0">
+      <b id="left">{{ cards|length + remaining }}</b> to read.
+      Drag the card, use the buttons, or press <kbd>←</kbd> / <kbd>→</kbd>.
+      <kbd>U</kbd> undoes the last one.
+    </p>
+  </div>
+</div>
+
+<div id="deck" class="deck">
+  {% include "_deck_cards.html" %}
+</div>
+
+<div class="deck-actions">
+  <button type="button" id="btn-no" class="big no">← Reject</button>
+  <button type="button" id="btn-undo" class="big">↺ Undo</button>
+  <button type="button" id="btn-yes" class="big yes">Shortlist →</button>
+</div>
+
+<div id="done" class="card" style="display:none">
+  <h3 style="margin-top:0">Done</h3>
+  <p class="muted">Every tbd applicant has been read.
+     <a href="{{ url_for('triage_shortlist') }}">Open the shortlist</a> to hand them to a professor.</p>
+</div>
+
+{% else %}
+<div class="card">
+  <h3 style="margin-top:0">Nothing to triage</h3>
+  <p class="muted">
+    {% if total_tbd %}
+      Every tbd applicant has already been swiped.
+      <a href="{{ url_for('triage_shortlist') }}">Open the shortlist</a>.
+    {% else %}
+      No applicant is marked <b>tbd</b> yet. Download the review spreadsheet from the
+      home page, mark the <code>status</code> column, and upload it again.
+    {% endif %}
+  </p>
+</div>
+{% endif %}
+
+<style>
+  .deck-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+  kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-bottom-width:2px;
+      border-radius:5px;padding:1px 5px;background:#fbfcff}
+  .deck{position:relative;height:calc(100vh - 250px);min-height:520px;max-height:820px}
+  .tcard{position:absolute;inset:0;display:flex;flex-direction:column;background:#fff;
+         border:1px solid var(--line);border-radius:16px;padding:16px 18px;overflow:hidden;
+         box-shadow:var(--shadow);cursor:grab;user-select:none;
+         transition:transform .34s cubic-bezier(.2,1.25,.4,1), opacity .28s ease}
+  .tcard.drag{transition:none;cursor:grabbing}
+  .tcard.gone{opacity:0}
+  /* the two cards underneath peek out, so the deck reads as a stack */
+  .tcard:nth-last-child(2){transform:scale(.985) translateY(8px)}
+  .tcard:nth-last-child(3){transform:scale(.97) translateY(16px)}
+  .wash{position:absolute;inset:0;opacity:0;pointer-events:none;transition:opacity .1s}
+  .wash.yes{background:linear-gradient(90deg,transparent 30%,var(--high-bg))}
+  .wash.no{background:linear-gradient(270deg,transparent 30%,var(--low-bg))}
+  .tcard-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;
+              padding-bottom:10px;border-bottom:1px solid var(--line)}
+  /* The card scrolls: a condensed summary still runs past the fold on a
+     laptop, and a decision made on half a card is a decision made blind. */
+  .tcard-scroll{position:relative;flex:1;min-height:0;margin-top:10px}
+  .tcard-body{height:100%;overflow-y:auto;overscroll-behavior:contain;
+              padding-right:6px;scrollbar-width:thin}
+  .tcard-body::-webkit-scrollbar{width:8px}
+  .tcard-body::-webkit-scrollbar-thumb{background:#d7deeb;border-radius:8px}
+  .tcard-body::-webkit-scrollbar-thumb:hover{background:var(--line-strong)}
+  .tcard-body .summary{background:transparent;border:0;padding:0}
+  /* a fade at the foot of the scroll area, so "there is more" is visible */
+  .tcard-fade{position:absolute;left:0;right:8px;bottom:0;height:30px;pointer-events:none;
+              background:linear-gradient(transparent,#fff);opacity:0;transition:opacity .15s}
+  .tcard-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+              border-top:1px solid var(--line);padding-top:10px;margin-top:8px}
+  .tcard-foot label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .tcard-foot select{cursor:pointer}
+  .stamp{position:absolute;top:18px;z-index:2;font-size:15px;font-weight:700;letter-spacing:.06em;
+         text-transform:uppercase;padding:5px 12px;border-radius:8px;border:2px solid;opacity:0;
+         background:rgba(255,255,255,.92)}
+  .stamp.yes{right:18px;color:var(--high);border-color:var(--high);transform:rotate(9deg)}
+  .stamp.no{left:18px;color:var(--low);border-color:var(--low);transform:rotate(-9deg)}
+  .deck-actions{display:flex;gap:10px;justify-content:center;margin-top:16px}
+  button.big{font-size:15px;padding:11px 22px;background:#fff;color:var(--ink);border:1px solid var(--line-strong)}
+  button.big:hover{background:#f5f7fc}
+  button.big.no{border-color:var(--low-line);color:var(--low)}
+  button.big.no:hover{background:var(--low-bg)}
+  button.big.yes{border-color:var(--high-line);color:var(--high)}
+  button.big.yes:hover{background:var(--high-bg)}
+</style>
+
+<script>
+(function(){
+  const deck = document.getElementById('deck');
+  if (!deck) return;
+  const token = "{{ csrf_token() }}";
+  const left = document.getElementById('left');
+  const done = document.getElementById('done');
+  const history = [];
+
+  const cards = () => Array.from(deck.querySelectorAll('.tcard:not(.gone)'));
+  const top = () => cards()[cards().length - 1] || null;
+  let remaining = {{ remaining }};
+  const seen = new Set();
+
+  // The deck holds a batch, not the whole pile: stack order is set here so a
+  // card fetched later sits correctly under the ones already on screen.
+  function restack(){
+    const all = cards();
+    all.forEach((c, i) => { c.style.zIndex = 100 - (all.length - 1 - i); });
+  }
+
+  function wireCard(card){
+    const body = card.querySelector('.tcard-body');
+    if (body) body.addEventListener('scroll', () => markOverflow(card));
+    markOverflow(card);
+  }
+
+  function fetchMore(){
+    if (!remaining) return Promise.resolve();
+    const params = new URLSearchParams();
+    seen.forEach(id => params.append('seen', id));
+    return fetch("{{ url_for('triage_cards') }}?" + params.toString())
+      .then(r => r.json())
+      .then(d => {
+        if (!d.html.trim()) { remaining = 0; return; }
+        // Prepend: new cards belong *under* the ones still on screen.
+        deck.insertAdjacentHTML('afterbegin', d.html);
+        remaining = d.remaining;
+        deck.querySelectorAll('.tcard').forEach(wireCard);
+        restack();
+      })
+      .catch(() => { window.toast('Could not load more applicants', 'bad'); });
+  }
+
+  function post(cas, direction, professor){
+    return fetch("{{ url_for('triage_swipe') }}", {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({cas_id: cas, direction: direction,
+                                 professor: professor || '', csrf_token: token})
+    });
+  }
+
+  // Whoever the card's dropdown names — only meaningful on a right swipe.
+  function pick(card){
+    const sel = card.querySelector('.prof-pick');
+    return sel ? sel.value : '';
+  }
+
+  // Only hint at more content when there is some — a permanent fade over a
+  // short card just looks like a rendering bug.
+  function markOverflow(card){
+    const body = card.querySelector('.tcard-body'), fade = card.querySelector('.tcard-fade');
+    if (!body || !fade) return;
+    const more = body.scrollHeight - body.scrollTop - body.clientHeight > 4;
+    fade.style.opacity = more ? 1 : 0;
+  }
+  deck.querySelectorAll('.tcard').forEach(wireCard);
+  restack();
+  window.addEventListener('resize', () => deck.querySelectorAll('.tcard').forEach(markOverflow));
+
+  function refresh(){
+    const n = cards().length;
+    if (left) left.textContent = n + remaining;
+    if (n <= 5 && remaining) fetchMore();
+    if (!n && !remaining && done) { done.style.display = 'block'; deck.style.display = 'none'; }
+  }
+
+  function fly(card, dir){
+    const x = dir === 'shortlist' ? window.innerWidth : -window.innerWidth;
+    card.style.transform = `translate(${x}px, -40px) rotate(${dir === 'shortlist' ? 18 : -18}deg)`;
+    card.classList.add('gone');
+    setTimeout(refresh, 60);
+  }
+
+  function swipe(dir){
+    const card = top();
+    if (!card) return;
+    const name = (card.querySelector('h3 a') || {}).textContent || 'Applicant';
+    history.push({cas: card.dataset.cas, el: card});
+    seen.add(card.dataset.cas);
+    post(card.dataset.cas, dir, pick(card));
+    fly(card, dir);
+    window.toast((dir === 'shortlist' ? 'Shortlisted ' : 'Rejected ') + name.trim()
+                 + ' — press U to undo', dir === 'shortlist' ? 'good' : '');
+  }
+
+  function undo(){
+    const last = history.pop();
+    if (!last) { window.toast('Nothing to undo'); return; }
+    post(last.cas, 'undo');
+    seen.delete(last.cas);
+    last.el.classList.remove('gone');
+    last.el.style.transform = '';
+    if (done) { done.style.display = 'none'; deck.style.display = ''; }
+    refresh();
+  }
+
+  // Drag: pointer events cover mouse and touch in one path.
+  let start = null, current = null, axis = null;
+  deck.addEventListener('pointerdown', ev => {
+    const card = top();
+    if (!card || !card.contains(ev.target)) return;
+    // Let the controls be controls — dragging from the dropdown would make it
+    // impossible to open.
+    if (ev.target.closest('a, select, option, label, button, input')) return;
+    current = card; start = {x: ev.clientX, y: ev.clientY}; axis = null;
+    card.classList.add('drag');
+  });
+  deck.addEventListener('pointermove', ev => {
+    if (!current || !start) return;
+    const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
+    // First real movement decides: sideways is a swipe, up/down is a scroll.
+    // Without this the card would swallow every attempt to read past the fold.
+    if (!axis){
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+      if (axis === 'x') current.setPointerCapture(ev.pointerId);
+      else { current.classList.remove('drag'); current = null; start = null; return; }
+    }
+    current.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 18}deg)`;
+    const lean = v => Math.max(0, Math.min(1, v / 120));
+    current.querySelector('.stamp.yes').style.opacity = lean(dx);
+    current.querySelector('.stamp.no').style.opacity = lean(-dx);
+    current.querySelector('.wash.yes').style.opacity = lean(dx) * 0.85;
+    current.querySelector('.wash.no').style.opacity = lean(-dx) * 0.85;
+  });
+  function release(ev){
+    if (!current) return;
+    const dx = ev.clientX - start.x;
+    const card = current;
+    card.classList.remove('drag');
+    current = null; start = null;
+    card.querySelectorAll('.stamp, .wash').forEach(s => s.style.opacity = 0);
+    if (Math.abs(dx) > 110) {
+      const dir = dx > 0 ? 'shortlist' : 'reject';
+      history.push({cas: card.dataset.cas, el: card});
+      seen.add(card.dataset.cas);
+      post(card.dataset.cas, dir, pick(card));
+      fly(card, dir);
+    } else {
+      card.style.transform = '';
+    }
+  }
+  deck.addEventListener('pointerup', release);
+  deck.addEventListener('pointercancel', release);
+
+  document.getElementById('btn-yes').addEventListener('click', () => swipe('shortlist'));
+  document.getElementById('btn-no').addEventListener('click', () => swipe('reject'));
+  document.getElementById('btn-undo').addEventListener('click', undo);
+  document.addEventListener('keydown', ev => {
+    if (ev.target.matches('input, textarea, select')) return;
+    if (ev.key === 'ArrowRight') swipe('shortlist');
+    else if (ev.key === 'ArrowLeft') swipe('reject');
+    else if (ev.key === 'u' || ev.key === 'U') undo();
+  });
+  refresh();
+})();
+</script>
+{% endblock %}

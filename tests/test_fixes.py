@@ -118,8 +118,11 @@ def test_index_served_from_cache_matches_record(tmp_path):
     e = entries[0]
     assert e["name"] == "Ada Lovelace" and e["summary_text"] == "A summary."
     assert "text" not in json.dumps(e) or True   # entry carries no document text
-    assert set(e) == {"cas_id", "name", "programs", "sources_present",
-                      "warnings", "ocr", "summary_text", "metrics"}
+    assert set(e) == {"cas_id", "name", "email", "programs", "sources_present",
+                      "warnings", "ocr", "summary_text", "review_status", "triage",
+                      "assigned_to", "professor_status", "professor_decided_at",
+                      "undergrad_degree", "has_packet", "source_file",
+                      "sop_sketch", "metrics"}
 
 
 # ---- scaling: reindex only re-analyzes the students an ingest touched -------

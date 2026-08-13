@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Accounts — Grad App{% endblock %}
+{% block body %}
+
+<p class="back"><a href="{{ url_for('index') }}">← Dashboard</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Professor queues</a></p>
+
+<div class="card">
+  <h3 style="margin-top:0">Accounts</h3>
+  <p class="muted">Who can sign in, and as what. An <b>advisor</b> gets the whole flow;
+     a <b>professor</b> sees only the students assigned to them.</p>
+
+  {% if users %}
+  <table style="margin-top:10px">
+    <thead><tr><th>Username</th><th>Role</th><th>Professor</th><th></th></tr></thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>{{ u.username }}{% if user and u.username == user.username %}
+            <span class="muted">· you</span>{% endif %}</td>
+        <td><span class="chip {{ 's' if u.role == 'advisor' }}">{{ u.role }}</span></td>
+        <td class="muted">{{ u.professor or '—' }}</td>
+        <td style="text-align:right">
+          {% if not (user and u.username == user.username) %}
+          <form action="{{ url_for('accounts_remove') }}" method="post" style="display:inline"
+                onsubmit="return confirm('Remove the login for {{ u.username }}?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="username" value="{{ u.username }}">
+            <button type="submit" class="danger" style="font-size:12px;padding:5px 11px">Remove</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{% if waiting %}
+<div class="card" style="border-color:var(--warn-line, var(--line-strong))">
+  <h3 style="margin-top:0">Waiting for approval
+    <span class="chip" style="vertical-align:middle">{{ waiting|length }}</span></h3>
+  <p class="muted">These people asked for an account from the sign-in page. They
+     can't open anything until you say what they are. Approve only people you
+     recognise — anyone who can reach the app can send a request.</p>
+
+  <table style="margin-top:10px">
+    <thead><tr><th>Username</th><th>Grant access as</th><th></th></tr></thead>
+    <tbody>
+      {% for u in waiting %}
+      <tr>
+        <td>{{ u.username }}</td>
+        <td>
+          <form action="{{ url_for('accounts_approve') }}" method="post"
+                class="aform" id="ap-{{ loop.index }}" style="gap:6px">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="username" value="{{ u.username }}">
+            <select name="role" class="ap-role">
+              <option value="professor">Professor</option>
+              <option value="advisor">Advisor</option>
+            </select>
+            <select name="professor" class="ap-prof">
+              <option value="">— which professor —</option>
+              {% for p in professors %}
+              <option value="{{ p.id }}">{{ p.name }}{% if p.id in linked %} (already has a login){% endif %}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="primary" style="font-size:12px;padding:5px 11px">Approve</button>
+          </form>
+        </td>
+        <td style="text-align:right">
+          <form action="{{ url_for('accounts_remove') }}" method="post" style="display:inline"
+                onsubmit="return confirm('Reject and delete the request from {{ u.username }}?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="username" value="{{ u.username }}">
+            <button type="submit" class="danger" style="font-size:12px;padding:5px 11px">Reject</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top:0">Add a login</h3>
+  <form action="{{ url_for('accounts_add') }}" method="post" class="aform">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="text" name="username" placeholder="Username" required>
+    <input type="password" name="password" placeholder="Password" required minlength="4">
+    <select name="role" id="role">
+      <option value="professor">Professor</option>
+      <option value="advisor">Advisor</option>
+    </select>
+    <select name="professor" id="prof">
+      <option value="">— which professor —</option>
+      {% for p in professors %}
+      <option value="{{ p.id }}">{{ p.name }}{% if p.id in linked %} (already has a login){% endif %}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="primary">Add</button>
+  </form>
+  <p class="muted" style="margin:12px 0 0">
+    A professor account has to name someone from
+    <a href="{{ url_for('professors_view', edit=1) }}">the faculty list</a> — that link is
+    how the app knows whose queue to show. You're setting these passwords on their behalf,
+    so hand them over in person or over something better than email.
+  </p>
+</div>
+
+<style>
+  .aform{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .aform input, .aform select{min-width:170px;flex:1}
+</style>
+
+<script>
+// A professor login needs a professor; an advisor login doesn't.
+(function(){
+  const role = document.getElementById('role'), prof = document.getElementById('prof');
+  function sync(){
+    const isProf = role.value === 'professor';
+    prof.style.display = isProf ? '' : 'none';
+    prof.required = isProf;
+  }
+  role.addEventListener('change', sync);
+  sync();
+})();
+
+// Same rule for each pending row's approve form.
+document.querySelectorAll('.ap-role').forEach(role => {
+  const prof = role.closest('form').querySelector('.ap-prof');
+  const sync = () => {
+    const isProf = role.value === 'professor';
+    prof.style.display = isProf ? '' : 'none';
+    prof.required = isProf;
+  };
+  role.addEventListener('change', sync);
+  sync();
+});
+</script>
+{% endblock %}

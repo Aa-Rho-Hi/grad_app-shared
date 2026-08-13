@@ -255,7 +255,7 @@ def test_csrf_token_enforced_outside_test_mode(monkeypatch, tmp_path):
     assert resp.status_code == 400
 
     # Fetch a page first to mint a session + token, then use the *wrong* token.
-    client.get("/", base_url="http://localhost")
+    client.get("/step/1", base_url="http://localhost")   # a page with a form
     resp = client.post("/reset", data={"csrf_token": "not-the-real-token"},
                        headers={"Origin": "http://localhost"}, base_url="http://localhost")
     assert resp.status_code == 400
@@ -271,7 +271,7 @@ def test_csrf_token_accepted_when_valid(monkeypatch, tmp_path):
     # back out of the session via the test client's cookie jar.
     with client.session_transaction() as sess:
         pass  # establishes the session cookie
-    client.get("/", base_url="http://localhost")
+    client.get("/step/1", base_url="http://localhost")   # a page with a form
     with client.session_transaction() as sess:
         token = sess["_csrf_token"]
 

@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Professor queues — Grad App{% endblock %}
+{% block body %}
+
+<p class="back"><a href="{{ url_for('applicants') }}">← All applicants</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('triage') }}">Triage deck</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('triage_shortlist') }}">Shortlist</a></p>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
+    <h3 style="margin:0">Professor queues</h3>
+    <a href="{{ url_for('professors_view', edit=None if editing else 1) }}"><button type="button">
+      {{ '← Back to queues' if editing else '✎ Edit professors' }}</button></a>
+  </div>
+  <p class="muted" style="margin:8px 0 0">Shortlisted applicants waiting on each faculty reviewer.</p>
+  <div class="filters" id="qfilters">
+    <input type="search" placeholder="Search a professor or an applicant…" aria-label="Search queues">
+    <div class="seg">
+      <button type="button" data-status="all" class="on">All</button>
+      <button type="button" data-status="busy">With a queue</button>
+      <button type="button" data-status="free">Empty</button>
+    </div>
+  </div>
+  <p class="empty-note">Nothing matches that search.</p>
+</div>
+
+{% if editing %}
+<div class="card">
+  <h3 style="margin-top:0">Add a professor</h3>
+  <form action="{{ url_for('professors_add') }}" method="post" class="pform">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="text" name="name" placeholder="Name" required>
+    <input type="url" name="url" placeholder="Profile link (optional)">
+    <input type="text" name="areas" placeholder="Areas, comma separated (optional)">
+    <button type="submit" class="primary">Add</button>
+  </form>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Edit or remove</h3>
+  <p class="muted">Renaming is safe — assignments follow the professor, not the name.
+     Removing someone sends anyone in their queue back to the shortlist, unassigned.</p>
+  {% for p in professors %}
+  <form action="{{ url_for('professors_update') }}" method="post" class="pform"
+        style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="id" value="{{ p.id }}">
+    <input type="text" name="name" value="{{ p.name }}" required>
+    <input type="url" name="url" value="{{ p.url }}" placeholder="Profile link">
+    <input type="text" name="areas" value="{{ p.areas|join(', ') }}" placeholder="Areas">
+    <button type="submit">Save</button>
+    <button type="submit" form="del-{{ p.id }}" class="danger"
+            onclick="return confirm({{ ('Remove ' ~ p.name ~ '? ' ~ (p.applicants|length) ~ ' applicant(s) in their queue go back to the shortlist, unassigned.')|tojson }})">Delete</button>
+    <span class="muted" style="font-size:12px">id: {{ p.id }}</span>
+  </form>
+  <form id="del-{{ p.id }}" action="{{ url_for('professors_delete') }}" method="post" style="display:none">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="id" value="{{ p.id }}">
+  </form>
+  {% else %}
+  <p class="muted">Nobody on the list yet.</p>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if unassigned %}
+<div class="card">
+  <h3 style="margin-top:0">Not assigned yet <span class="chip w">{{ unassigned|length }}</span></h3>
+  <p class="muted">Shortlisted but not in anyone's queue —
+     <a href="{{ url_for('triage_shortlist') }}">assign them</a>.</p>
+  <div class="chips">
+    {% for a in unassigned %}
+    <a href="{{ url_for('student', cas_id=a.cas_id) }}" class="chip">{{ a.name }}</a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% for p in professors %}
+<div class="card queue"
+     data-search="{{ p.name }} {{ (p.areas or [])|join(' ') }} {{ p.applicants|map(attribute='name')|join(' ') }}"
+     data-status="{{ 'busy' if p.applicants else 'free' }}">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
+    <h3 style="margin:0">
+      {% if p.url %}<a href="{{ p.url }}" target="_blank" rel="noopener">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %}
+    </h3>
+    <span class="chip {{ 's' if p.applicants else '' }}">{{ p.applicants|length }} in queue</span>
+  </div>
+  {% if p.areas %}<div class="muted" style="font-size:13px;margin-top:2px">{{ p.areas|join(', ') }}</div>{% endif %}
+
+  {% if p.applicants %}
+  <table style="margin-top:10px">
+    <thead><tr><th>Applicant</th><th>ID</th><th>GPA</th><th>Areas</th></tr></thead>
+    <tbody>
+      {% for a in p.applicants %}
+      {% set m = a.metrics or {} %}
+      <tr>
+        <td><a href="{{ url_for('student', cas_id=a.cas_id) }}">{{ a.name }}</a></td>
+        <td class="muted">{{ a.cas_id }}</td>
+        <td>{{ m.get('gpa_value') or ('%.2f'|format(m.get('gpa4')) if m.get('gpa4') is not none else '—') }}</td>
+        <td class="muted">{{ (m.get('areas') or [])|join(', ') or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted" style="margin:8px 0 0">Nobody assigned yet.</p>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if not professors %}
+<div class="card"><p class="muted">No professors yet —
+  <a href="{{ url_for('professors_view', edit=1) }}">add one</a>, or edit
+  <code>config/professors.yaml</code> directly.</p></div>
+{% endif %}
+
+<style>
+  .pform{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .pform input[type=text], .pform input[type=url]{font-size:14px;padding:8px 10px;
+    border:1px solid var(--line);border-radius:8px;min-width:180px;flex:1}
+  .pform button{font-size:13px;padding:8px 14px;background:#fff;color:var(--ink);border:1px solid var(--line)}
+  .pform button:hover{background:#f4f7fb}
+  .pform button.primary{background:var(--accent);color:#fff;border:0}
+  .pform button.primary:hover{background:var(--accent-ink)}
+  .pform button.danger{border-color:var(--low-line);color:var(--low);background:#fff}
+  .pform button.danger:hover{background:var(--low-bg)}
+</style>
+
+<script>
+window.wireFilters('#qfilters', '.card.queue');
+// Edits save in place; only add and delete change the list's shape, so only
+// those reload.
+document.querySelectorAll('form.pform').forEach(function(form){
+  form.addEventListener('submit', function(ev){
+    ev.preventDefault();
+    const reshapes = form.action.endsWith('/add') || form.action.endsWith('/delete');
+    window.postForm(form, function(){
+      if (reshapes) setTimeout(() => window.location.reload(), 500);
+    });
+  });
+});
+</script>
+{% endblock %}

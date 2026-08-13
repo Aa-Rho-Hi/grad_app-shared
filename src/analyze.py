@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import os
 import re
+import zlib
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import yaml
 
@@ -57,14 +58,51 @@ def _shingles(text: str, n: int = 3) -> set:
     return {" ".join(toks[i:i + n]) for i in range(max(0, len(toks) - n + 1))}
 
 
-def jaccard(a: str, b: str) -> float:
-    """Trigram Jaccard similarity of two texts (0..1). Deterministic."""
-    sa, sb = _shingles(a), _shingles(b)
+# A bottom-k MinHash sketch of an SOP's trigrams. Small enough to keep on every
+# index entry, and comparable without loading the document — which is what
+# turns "compare this SOP to every other one" from a full-table read into a
+# few hundred integer set operations.
+_SKETCH_SIZE = 96
+
+
+def sketch(text: str) -> List[int]:
+    """Stable, deterministic sketch. `hash()` would be wrong here: it is salted
+    per process, so a sketch written today wouldn't match one read tomorrow."""
+    hashes = sorted(zlib.crc32(sh.encode("utf-8")) for sh in _shingles(text))
+    return hashes[:_SKETCH_SIZE]
+
+
+def sketch_similarity(a: Sequence[int], b: Sequence[int]) -> float:
+    """Estimated Jaccard from two sketches (bottom-k MinHash).
+
+    An estimate, deliberately: it is used to *shortlist* candidates, and the
+    pair that survives is then compared exactly. Cheap and slightly wrong is
+    the right trade for a filter; it would be the wrong trade for the number a
+    reviewer sees.
+    """
+    if not a or not b:
+        return 0.0
+    k = min(len(a), len(b))
+    both, union = set(a) & set(b), sorted(set(a) | set(b))[:k]
+    return round(sum(1 for h in union if h in both) / k, 3) if union else 0.0
+
+
+def shingles(text: str):
+    """The trigram set behind `jaccard`, exposed so a caller comparing one text
+    against many can tokenize each of them once instead of once per pair."""
+    return _shingles(text)
+
+
+def jaccard_sets(sa, sb) -> float:
     if not sa or not sb:
         return 0.0
-    inter = len(sa & sb)
     union = len(sa | sb)
-    return round(inter / union, 3) if union else 0.0
+    return round(len(sa & sb) / union, 3) if union else 0.0
+
+
+def jaccard(a: str, b: str) -> float:
+    """Trigram Jaccard similarity of two texts (0..1). Deterministic."""
+    return jaccard_sets(_shingles(a), _shingles(b))
 
 
 _MOTIVATION_CUES = [

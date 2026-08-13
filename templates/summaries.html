@@ -1,15 +1,21 @@
 {% extends "base.html" %}
+{% from "_summary.html" import summary_card %}
 {% block title %}Summaries — Grad App{% endblock %}
 {% block body %}
 
-<p class="back"><a href="{{ url_for('index') }}">← All applicants</a>
+<p class="back"><a href="{{ url_for('applicants') }}">← All applicants</a>
    &nbsp;·&nbsp; <a href="{{ url_for('download_summaries') }}">⬇ Download all summaries (.md)</a></p>
 
 {% if summaries %}
 <div class="card">
-  <h3 style="margin-top:0">Applicant summaries</h3>
-  <p class="muted">A factual summary for each applicant, listed alphabetically. Descriptive only —
-     no scoring or ranking.</p>
+  <h3 style="margin-top:0">Reviewed</h3>
+  <p class="muted"><b>{{ reviewed }} of {{ total }}</b> applicants —
+     {{ kept }} shortlisted, {{ reviewed - kept }} rejected. These are the ones you
+     swiped in triage; a summary is the record of a read that happened.
+     {% if waiting %}<a href="{{ url_for('triage') }}">{{ waiting }} still waiting in the deck</a>.{% endif %}</p>
+  <p class="muted">Descriptive only — no scoring or ranking. Quoted text is verbatim from the
+     applicant's SOP or their letters, clipped but never paraphrased; open an applicant for
+     the full documents.</p>
 </div>
 
 {% for s in summaries %}
@@ -17,11 +23,26 @@
   <h3 style="margin:0">
     <a href="{{ url_for('student', cas_id=s.cas_id) }}">{{ s.name }}</a>
     <span class="muted" style="font-weight:400;font-size:13px">· {{ s.cas_id }}</span>
-    {% if s.warnings %}<span class="chip w" style="float:right">⚠ {{ s.warnings|length }} to verify</span>{% endif %}
+    <span style="float:right;display:flex;gap:6px">
+      <span class="chip {{ 's' if s.triage == 'shortlist' else 'w' }}">{{ 'shortlisted' if s.triage == 'shortlist' else 'rejected' }}</span>
+      {% if s.warnings %}<span class="chip w">⚠ {{ s.warnings|length }} to verify</span>{% endif %}
+    </span>
   </h3>
-  <div class="summary" style="margin-top:12px">{{ s.summary_text }}</div>
+  <div style="margin-top:12px">{{ summary_card(s.summary_text) }}</div>
 </div>
 {% endfor %}
+
+{% if pages > 1 %}
+<div class="card" style="display:flex;align-items:center;justify-content:center;gap:14px">
+  {% if page > 1 %}<a href="{{ url_for('summaries', page=page-1) }}"><button type="button">← Previous</button></a>{% endif %}
+  <span class="muted">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="{{ url_for('summaries', page=page+1) }}"><button type="button">Next →</button></a>{% endif %}
+</div>
+{% endif %}
+{% elif total %}
+<div class="card"><p class="muted">Nothing reviewed yet. Summaries appear here once you
+   shortlist or reject someone in <a href="{{ url_for('triage') }}">triage</a>
+   {%- if waiting %} — {{ waiting }} are waiting{% endif %}.</p></div>
 {% else %}
 <div class="card"><p class="muted">No applicants yet. Upload a file on the home page first.</p></div>
 {% endif %}

@@ -37,6 +37,8 @@ from urllib.parse import quote
 
 from .merge import (applicant_metrics, merge_identity, new_student,
                     sources_present, summary_view, _is_cas_id, _norm_name)
+from .analyze import sketch
+from .review import undergrad_degree
 from .template import render
 
 DB_FILENAME = "students.db"
@@ -47,8 +49,21 @@ _DB_LOCKS: Dict[str, threading.RLock] = {}
 _CONFIG_GUARD = threading.Lock()
 
 
+def is_postgres(target: str) -> bool:
+    return target.startswith(("postgres://", "postgresql://"))
+
+
 def db_path_for(outdir: str) -> str:
-    return os.path.join(outdir, DB_FILENAME)
+    """Where the records live.
+
+    Returns a DSN when GRADAPP_DATABASE_URL is set (Cloud SQL) and a file path
+    otherwise. Deliberately the same function every call site already uses, so
+    switching backends changes one environment variable and no code — the
+    alternative was threading a backend choice through a dozen constructors,
+    which is a dozen chances to miss one and silently write to the wrong place.
+    """
+    dsn = os.environ.get("GRADAPP_DATABASE_URL", "").strip()
+    return dsn or os.path.join(outdir, DB_FILENAME)
 
 
 def _now() -> str:
@@ -96,11 +111,105 @@ def _apply_ddl(conn: sqlite3.Connection) -> None:
             pass   # column already exists
 
 
+# --------------------------------------------------------------- Postgres --
+#
+# Cloud SQL. The record shape, the index_json cache and every query below are
+# the same; what differs is the dialect and how "one writer at a time" is
+# obtained. SQLite gets it from BEGIN IMMEDIATE taking the database's write
+# lock. Postgres has no equivalent, and row locks aren't enough here: update()
+# does read-modify-write and may be *creating* the row, so there is nothing to
+# lock yet and two concurrent creators would both insert with the last one
+# winning. A transaction-scoped advisory lock reproduces the SQLite guarantee
+# exactly, and write volume is low enough (ingest is a batch job) that
+# serializing writers costs nothing that matters.
+
+_PG_DDL = (
+    "CREATE TABLE IF NOT EXISTS students ("
+    " cas_id TEXT PRIMARY KEY,"
+    " record TEXT NOT NULL,"
+    " name   TEXT,"
+    " index_json TEXT,"
+    " updated_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS quarantine ("
+    " id BIGSERIAL PRIMARY KEY,"
+    " source_row INTEGER,"
+    " cas_id TEXT,"
+    " errors TEXT,"
+    " raw TEXT,"
+    " created_at TEXT)",
+    # index() and all() order by name; without this it's a sort of every row.
+    "CREATE INDEX IF NOT EXISTS students_name_lower ON students (LOWER(name))",
+)
+
+#: Arbitrary constant, only has to be stable across instances — it's the key
+#: every writer contends on.
+_PG_WRITE_LOCK = 8_675_309
+
+
+class _PgCursor:
+    """A psycopg2 cursor that answers to sqlite3.Row's subscripting."""
+
+    def __init__(self, cur):
+        self._cur = cur
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+
+class _PgConn:
+    """psycopg2 connection wearing sqlite3.Connection's interface.
+
+    Lets every query body in Store stay backend-agnostic: `conn.execute(sql,
+    params)` returning something you can fetch from. Placeholders are written
+    as `?` throughout and rewritten here, so there is one SQL string per query
+    rather than two that can drift apart.
+    """
+
+    def __init__(self, raw):
+        self._raw = raw
+        self.in_transaction = False
+
+    def execute(self, sql: str, params: tuple = ()):
+        import psycopg2.extras
+        cur = self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        upper = sql.strip().upper()
+        if upper.startswith("BEGIN"):
+            self.in_transaction = True
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_PG_WRITE_LOCK,))
+            return _PgCursor(cur)
+        if upper.startswith(("COMMIT", "ROLLBACK")):
+            self._raw.commit() if upper.startswith("COMMIT") else self._raw.rollback()
+            self.in_transaction = False
+            return _PgCursor(cur)
+        cur.execute(sql.replace("?", "%s"), params)
+        return _PgCursor(cur)
+
+    def close(self):
+        try:
+            self._raw.close()
+        except Exception:
+            pass
+
+
 class Store:
     """Transactional store for unified student records + quarantine rows."""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self.is_pg = is_postgres(db_path)
+        if self.is_pg:
+            # No filesystem probing: the whole WAL / OS-lock / relocate dance
+            # below exists because SQLite is a file, and a server isn't.
+            with _CONFIG_GUARD:
+                if db_path not in _DB_CONFIG:
+                    _DB_LOCKS[db_path] = threading.RLock()
+                    _DB_CONFIG[db_path] = self._init_pg()
+            self._cfg = _DB_CONFIG[db_path]
+            self._lock = _DB_LOCKS[db_path]
+            return
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         with _CONFIG_GUARD:
             if db_path not in _DB_CONFIG:
@@ -110,6 +219,32 @@ class Store:
         self._lock = _DB_LOCKS[db_path]
         # use the effective path (may have been relocated off a hostile mount)
         self.db_path = self._cfg.get("path", db_path)
+
+    # ---- dialect --------------------------------------------------------
+    @property
+    def _nocase(self) -> str:
+        """Case-insensitive ordering by name."""
+        return "LOWER(name)" if self.is_pg else "name COLLATE NOCASE"
+
+    @property
+    def _sketch_expr(self) -> str:
+        """Pull one field out of the cached index without parsing the rest."""
+        return ("index_json::jsonb ->> 'sop_sketch'" if self.is_pg
+                else "json_extract(index_json, '$.sop_sketch')")
+
+    def _init_pg(self) -> Dict[str, Any]:
+        conn = self._pg_connect()
+        try:
+            for ddl in _PG_DDL:
+                conn.execute(ddl)
+            conn.execute("COMMIT")
+        finally:
+            conn.close()
+        return {"journal": "postgres", "nolock": False, "path": self.db_path}
+
+    def _pg_connect(self) -> "_PgConn":
+        import psycopg2
+        return _PgConn(psycopg2.connect(self.db_path, connect_timeout=15))
 
     # ---- connection -----------------------------------------------------
     def _open(self, *, nolock: bool, path: Optional[str] = None) -> sqlite3.Connection:
@@ -123,7 +258,9 @@ class Store:
         conn.execute("PRAGMA busy_timeout=30000")   # wait, don't fail, on a lock
         return conn
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self):
+        if self.is_pg:
+            return self._pg_connect()
         return self._open(nolock=self._cfg["nolock"])
 
     @staticmethod
@@ -267,7 +404,7 @@ class Store:
                 if conn.in_transaction:
                     try:
                         conn.execute("ROLLBACK")
-                    except sqlite3.Error:
+                    except Exception:
                         pass
                 raise
             finally:
@@ -313,16 +450,40 @@ class Store:
 
     @staticmethod
     def _index_entry(unified: Dict[str, Any]) -> Dict[str, Any]:
-        """The lightweight list-view entry for one student (no document text)."""
+        """The lightweight list-view entry for one student (no document text).
+
+        The undergrad degree is derived here, once per write, and cached — it
+        means re-reading the résumé and transcript text, and doing that for
+        every applicant on every page view made the status export take eleven
+        seconds at five thousand records.
+        """
         app = unified["sources"].get("application") or {}
+        sources = unified.get("sources") or {}
         return {
             "cas_id": unified["student_id"],
             "name": unified["identity"].get("full_name", unified["student_id"]),
+            "email": unified["identity"].get("email", ""),
+            "undergrad_degree": undergrad_degree(unified),
+            "has_packet": any(sources.get(k) for k in ("resume", "sop", "scores"))
+                          or bool(sources.get("lors")),
+            # Which roster file this applicant came from, so the review-sheet
+            # writer can find it without reading every full record's provenance.
+            "source_file": next((p.get("file") for p in reversed(unified.get("provenance") or [])
+                                 if p.get("source") == "application" and p.get("file")), ""),
+            # Sketch of this applicant's SOP, so the near-duplicate check can
+            # shortlist candidates from the index instead of reading every
+            # record's full essay for every incoming document.
+            "sop_sketch": sketch((sources.get("sop") or {}).get("text") or ""),
             "programs": [p.get("name") for p in app.get("programs", []) if p.get("name")],
             "sources_present": sources_present(unified),
             "warnings": unified.get("warnings", []),
             "ocr": unified.get("ocr"),
             "summary_text": unified.get("summary", ""),
+            "review_status": unified.get("review_status", ""),
+            "triage": unified.get("triage", ""),
+            "assigned_to": unified.get("assigned_to", ""),
+            "professor_status": unified.get("professor_status", ""),
+            "professor_decided_at": unified.get("professor_decided_at", ""),
             "metrics": applicant_metrics(unified),
         }
 
@@ -348,7 +509,7 @@ class Store:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT record FROM students ORDER BY name COLLATE NOCASE").fetchall()
+                f"SELECT record FROM students ORDER BY {self._nocase}").fetchall()
             return [json.loads(r["record"]) for r in rows]
         finally:
             conn.close()
@@ -357,6 +518,43 @@ class Store:
         conn = self._connect()
         try:
             return conn.execute("SELECT COUNT(*) AS n FROM students").fetchone()["n"]
+        finally:
+            conn.close()
+
+    def sop_sketches(self) -> List[tuple]:
+        """[(cas_id, sketch)] for everyone with an SOP, and nothing else.
+
+        The near-duplicate check runs once per incoming document against every
+        applicant on file. Going through `index()` for that pulled each
+        applicant's whole summary card through JSON for every comparison; this
+        pulls two small fields with SQLite doing the extraction.
+        """
+        conn = self._connect()
+        try:
+            try:
+                rows = conn.execute(
+                    f"SELECT cas_id, {self._sketch_expr} AS sk "
+                    "FROM students WHERE index_json IS NOT NULL").fetchall()
+                # An applicant with no SOP still has a sop_sketch — it's just
+                # `[]`. Dropping those here keeps the near-duplicate scan
+                # proportional to the essays on file rather than the roster.
+                out = []
+                for r in rows:
+                    sk = json.loads(r["sk"]) if r["sk"] and r["sk"] != "null" else None
+                    if sk:
+                        out.append((r["cas_id"], sk))
+                return out
+            except sqlite3.OperationalError:
+                # No JSON1 in this SQLite build — fall back to parsing here.
+                rows = conn.execute(
+                    "SELECT cas_id, index_json FROM students "
+                    "WHERE index_json IS NOT NULL").fetchall()
+                out = []
+                for r in rows:
+                    sk = (json.loads(r["index_json"]) or {}).get("sop_sketch")
+                    if sk:
+                        out.append((r["cas_id"], sk))
+                return out
         finally:
             conn.close()
 
@@ -370,8 +568,8 @@ class Store:
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT record, index_json FROM students "
-                "ORDER BY name COLLATE NOCASE").fetchall()
+                f"SELECT record, index_json FROM students "
+                f"ORDER BY {self._nocase}").fetchall()
         finally:
             conn.close()
         out: List[Dict[str, Any]] = []
@@ -470,6 +668,11 @@ class Store:
                             target["warnings"].append(w)
                     if ou.get("ocr") and not target.get("ocr"):
                         target["ocr"] = ou["ocr"]
+                    # A review status recorded against the duplicate is the
+                    # reviewer's work — carry it over rather than dropping it
+                    # and silently returning the applicant to the tbd pile.
+                    if ou.get("review_status") and not target.get("review_status"):
+                        target["review_status"] = ou["review_status"]
                     merged_away.append(ok)
                 target["summary"] = render(summary_view(target))
                 self._write(conn, target)

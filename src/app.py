@@ -39,6 +39,7 @@ at data/audit.log (method/path/status only -- no applicant data).
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import secrets
@@ -52,11 +53,23 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.utils import secure_filename
 
-from .run import run, reindex
-from .merge import summary_view, sources_present
+from . import jobs
+from .run import run, reindex, summaries_markdown
+from .merge import likely_duplicate_groups, summary_view, sources_present
 from .documents import DOC_TYPES, infer_cas_id, ingest_document
-from .ingest_zip import ingest_zip
+from .ingest_zip import ingest_packet_folder, ingest_zip
+from .review import degree_coverage, write_review_sheet
+from .triage import (PROF_DECISIONS, SWIPES, ProfessorError, add_professor,
+                     apply_professor_decision, apply_swipe, assign, assigned_to,
+                     condense_card, deck, decided, load_professors,
+                     professor_by_id, professor_deck, queues, remove_professor,
+                     save_professors, shortlisted, update_professor)
+from .status_report import write_status_report
 from .store import Store, db_path_for
+from .users import (ADVISOR, PENDING, PROFESSOR, UserError, add_user,
+                    approve_user, authenticate, load_users,
+                    login_required_globally, pending_users, remove_user,
+                    request_account, save_users)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
@@ -68,6 +81,8 @@ FIELD_MAP = os.path.join(ROOT, "config", "csv_field_map.yaml")
 # deep inside the pipeline (or just sit on disk as an unrecognized blob).
 CSV_EXTS = {".csv", ".xlsx", ".xls", ".xlsm"}
 ZIP_EXTS = {".zip"}
+# The packets drop zone: a ZIP of packets, loose packet PDFs, or a mix.
+PACKET_EXTS = {".zip", ".pdf"}
 DOC_EXTS = {".pdf", ".docx", ".txt", ".md"}
 
 # File-signature ("magic bytes") checks layered on top of the extension
@@ -93,6 +108,18 @@ def _sniff_ok(filename: str, head: bytes) -> bool:
     return True   # .csv/.txt/.md: no magic number, red-flag check above is it
 
 
+# Most filesystems cap a single name at 255 bytes. secure_filename() sanitizes
+# but never shortens, so a long name reached open() and raised OSError 36 —
+# a 500 on an upload that was otherwise fine.
+_MAX_NAME = 120
+
+
+def _safe_name(filename: str, default: str) -> str:
+    name = secure_filename(filename or "") or default
+    stem, ext = os.path.splitext(name)
+    return stem[:_MAX_NAME] + ext[:16] if len(name) > _MAX_NAME else name
+
+
 def _save_upload(file, dest: str) -> bool:
     """Sniff the file's signature before writing it to disk. Returns False
     (and does not save) if the content doesn't match what the extension
@@ -108,9 +135,27 @@ def _save_upload(file, dest: str) -> bool:
 
 app = Flask(__name__, template_folder=os.path.join(ROOT, "templates"))
 
+# Which world are we in? Everything below keys off this. "local" keeps the
+# laptop-friendly defaults that make this pleasant to develop against; anything
+# else means the app is reachable by people who aren't you, and the defaults
+# inverto to fail-closed. Set GRADAPP_ENV=cloud in the container.
+DEPLOYMENT = os.environ.get("GRADAPP_ENV", "local").strip().lower()
+IS_CLOUD = DEPLOYMENT != "local"
+
 # Guardrail: never ship a hardcoded secret key -- it's visible to anyone who
 # reads this file and would let them forge the signed session/flash cookie.
-app.secret_key = os.environ.get("GRADAPP_SECRET_KEY") or secrets.token_hex(32)
+#
+# The random fallback is right on a laptop (a restart just logs you out) and
+# wrong everywhere else: with more than one instance each gets a *different*
+# key, so a session minted by one is rejected by the next -- users get logged
+# out at random and it looks like a flaky app rather than a config error.
+_SECRET = os.environ.get("GRADAPP_SECRET_KEY")
+if IS_CLOUD and not _SECRET:
+    raise SystemExit(
+        "GRADAPP_ENV is not 'local' but GRADAPP_SECRET_KEY is unset. Generate "
+        "one (`python -c 'import secrets;print(secrets.token_hex(32))'`), keep "
+        "it in Secret Manager, and give every instance the same value.")
+app.secret_key = _SECRET or secrets.token_hex(32)
 
 # Guardrail: cap request size so one oversized upload can't exhaust memory or
 # disk before any of the pipeline's own per-file size checks get a chance to
@@ -120,6 +165,10 @@ app.config["MAX_CONTENT_LENGTH"] = (
 )
 
 DEBUG = os.environ.get("GRADAPP_DEBUG", "0") == "1"
+if IS_CLOUD and DEBUG:
+    raise SystemExit(
+        "GRADAPP_DEBUG=1 with GRADAPP_ENV=cloud. The Werkzeug debugger runs "
+        "arbitrary code from the browser -- never on a reachable host.")
 app.config["DEBUG"] = DEBUG
 
 # Guardrail: session cookie hardening. HTTPONLY is Flask's default already;
@@ -129,7 +178,8 @@ app.config["DEBUG"] = DEBUG
 # localhost -- forcing Secure there would silently break the cookie.
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = os.environ.get("GRADAPP_FORCE_SECURE_COOKIES") == "1"
+app.config["SESSION_COOKIE_SECURE"] = (
+    IS_CLOUD or os.environ.get("GRADAPP_FORCE_SECURE_COOKIES") == "1")
 
 # Guardrail: optional access control. Unset by default (fine for a single
 # reviewer on localhost); set GRADAPP_PASSWORD to require HTTP Basic Auth on
@@ -256,6 +306,265 @@ def _access_log(response: Response) -> Response:
     return response
 
 
+# --------------------------------------------------------------- accounts --
+#
+# Login is off until `config/users.yaml` has someone in it (see src/users.py).
+# With no accounts this is the single-reviewer tool it has always been; with
+# accounts, every page needs a session and the role decides what you can reach.
+
+# Endpoints reachable without a session, so the login page itself can render.
+_OPEN_ENDPOINTS = {"login", "logout", "setup", "signup", "static"}
+
+# Four is fine on a laptop -- a demo needs a password someone can type off a
+# slide, and the real protection there is that the app refuses to bind beyond
+# loopback. On anything reachable that reasoning evaporates, so the floor goes
+# up with the environment rather than relying on someone remembering to raise
+# it.
+_MIN_PASSWORD = 12 if IS_CLOUD else 4
+
+# Guardrail: the app runs with *no login at all* until an account exists. That
+# is the right default on a laptop and catastrophic on a public URL -- an empty
+# users.yaml in a fresh container would serve every applicant's file to anyone
+# who found the address.
+#
+# So in cloud mode the first account has to be claimed with a token only the
+# operator has. Refuse to boot without one, rather than starting wide open and
+# hoping whoever finds /setup first is you.
+_SETUP_TOKEN = os.environ.get("GRADAPP_SETUP_TOKEN", "")
+if IS_CLOUD and not _SETUP_TOKEN and not login_required_globally():
+    raise SystemExit(
+        "No accounts exist and GRADAPP_SETUP_TOKEN is unset, so the app would "
+        "serve applicant data with no login. Set GRADAPP_SETUP_TOKEN to a "
+        "random string, open /setup?token=<it> once to create the advisor "
+        "account, then remove the variable.")
+
+
+def _setup_token_ok() -> bool:
+    """Cloud only: /setup needs the operator's token before it will mint the
+    first advisor. Locally it stays open -- there's nobody else on the box."""
+    if not IS_CLOUD:
+        return True
+    offered = request.values.get("token", "")
+    return bool(_SETUP_TOKEN) and secrets.compare_digest(offered, _SETUP_TOKEN)
+
+
+def current_user():
+    return session.get("user") if login_required_globally() else None
+
+
+def _is(role: str) -> bool:
+    """No accounts configured -> one operator who can do everything."""
+    user = current_user()
+    return user["role"] == role if user else True
+
+
+@app.context_processor
+def _inject_user():
+    return {"user": current_user(),
+            "logins_on": login_required_globally(),
+            "is_advisor": _is(ADVISOR), "is_professor": _is(PROFESSOR)}
+
+
+@app.before_request
+def _require_login():
+    if request.endpoint in _OPEN_ENDPOINTS:
+        return None
+    if not login_required_globally():
+        # No accounts. On a laptop that's single-reviewer mode and everything
+        # stays open. On a reachable host it means the app hasn't been claimed
+        # yet, and open would mean open to the internet.
+        if IS_CLOUD:
+            return redirect(url_for("setup"))
+        return None
+    if not session.get("user"):
+        if _wants_json():
+            return {"error": "Sign in first."}, 401
+        return redirect(url_for("login", next=request.path))
+    return None
+
+
+def role_required(role: str):
+    """Gate a route to one role. A professor poking at an advisor URL gets a
+    403, not a redirect — silently bouncing them to their own page would hide
+    the fact that the link they were sent is not for them."""
+    def decorate(view):
+        @functools.wraps(view)
+        def wrapped(*a, **kw):
+            if not _is(role):
+                abort(403, description=f"That page is for the {role}.")
+            return view(*a, **kw)
+        return wrapped
+    return decorate
+
+
+@app.route("/login", methods=["GET", "POST"])
+@limiter.limit("40/hour", methods=["POST"])
+def login():
+    if not login_required_globally():
+        return redirect(url_for("index"))
+    if request.method == "POST":
+        user = authenticate(request.form.get("username", ""),
+                            request.form.get("password", ""))
+        if not user:
+            flash("That username and password don't match.")
+            return redirect(url_for("login"))
+        if user["role"] == PENDING:
+            # Correct password, no role yet. Safe to be specific here precisely
+            # because they've already proved who they are — the generic message
+            # above is what everyone else gets.
+            flash("Your account is still waiting for an advisor to approve it.")
+            return redirect(url_for("login"))
+        session["user"] = {"username": user["username"], "role": user["role"],
+                           "professor": user["professor"]}
+        nxt = request.args.get("next") or request.form.get("next") or ""
+        # Only ever bounce to our own paths — an absolute URL here would make
+        # the login form an open redirect.
+        target = nxt if nxt.startswith("/") and not nxt.startswith("//") else None
+        return redirect(target or url_for("index"))
+    return render_template("login.html")
+
+
+@app.route("/signup", methods=["GET", "POST"])
+@limiter.limit("10/hour", methods=["POST"])
+def signup():
+    """Ask for an account. Creates a request, not access.
+
+    Only offered once real accounts exist — before that /setup is the way in,
+    and having two "create an account" doors on a wide-open app is how you end
+    up with the wrong one being used.
+    """
+    if not login_required_globally():
+        return redirect(url_for("setup"))
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        if password != request.form.get("confirm", ""):
+            flash("Those passwords don't match.")
+            return redirect(url_for("signup"))
+        if len(password) < _MIN_PASSWORD:
+            flash(f"Use at least {_MIN_PASSWORD} characters.")
+            return redirect(url_for("signup"))
+        try:
+            save_users(request_account(load_users(), username, password))
+        except UserError:
+            # Deliberately vague, and deliberately the same words as success:
+            # "that name is taken" on an open form tells a stranger exactly who
+            # has an account here.
+            pass
+        flash("Request sent. An advisor has to approve it before you can sign in.")
+        return redirect(url_for("login"))
+    return render_template("signup.html", min_password=_MIN_PASSWORD)
+
+
+@app.route("/logout", methods=["POST", "GET"])
+def logout():
+    session.pop("user", None)
+    return redirect(url_for("login"))
+
+
+@app.route("/setup", methods=["GET", "POST"])
+@limiter.limit("20/hour", methods=["POST"])
+def setup():
+    """Create the first advisor account, from the browser.
+
+    Only available while there are no accounts at all — otherwise this page
+    would be a way for anyone who can reach the app to mint themselves an
+    advisor login. After the first account exists, use Accounts (or the CLI).
+    """
+    if login_required_globally():
+        flash("Accounts already exist — sign in, then use Accounts to add more.")
+        return redirect(url_for("login"))
+    if not _setup_token_ok():
+        # 404 rather than 403: an unclaimed instance shouldn't advertise that
+        # there's a first-advisor page here waiting to be taken.
+        abort(404)
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        if password != request.form.get("confirm", ""):
+            flash("Those passwords don't match.")
+            return redirect(url_for("setup"))
+        if len(password) < _MIN_PASSWORD:
+            flash(f"Use at least {_MIN_PASSWORD} characters.")
+            return redirect(url_for("setup"))
+        try:
+            save_users(add_user([], username, password, ADVISOR))
+        except UserError as exc:
+            flash(str(exc))
+            return redirect(url_for("setup"))
+        session["user"] = {"username": username, "role": ADVISOR, "professor": ""}
+        flash(f"Signed in as {username}. Add logins for your professors under Accounts.")
+        return redirect(url_for("accounts"))
+    return render_template("setup.html")
+
+
+@app.route("/accounts")
+@role_required(ADVISOR)
+def accounts():
+    """Who can sign in. Advisor-only: it hands out access."""
+    people = load_users()
+    linked = {u["professor"] for u in people if u["professor"]}
+    return render_template("accounts.html",
+                           users=[u for u in people if u["role"] != PENDING],
+                           waiting=pending_users(people),
+                           professors=load_professors(), linked=linked)
+
+
+@app.route("/accounts/approve", methods=["POST"])
+@role_required(ADVISOR)
+@limiter.limit("60/hour")
+def accounts_approve():
+    username = request.form.get("username", "")
+    try:
+        save_users(approve_user(load_users(), username,
+                                request.form.get("role", ""),
+                                request.form.get("professor", "")))
+        flash(f"Approved {username}.")
+    except UserError as exc:
+        flash(str(exc))
+    return redirect(url_for("accounts"))
+
+
+@app.route("/accounts/add", methods=["POST"])
+@role_required(ADVISOR)
+@limiter.limit("60/hour")
+def accounts_add():
+    password = request.form.get("password", "")
+    if len(password) < _MIN_PASSWORD:
+        flash(f"Use at least {_MIN_PASSWORD} characters.")
+        return redirect(url_for("accounts"))
+    if password != request.form.get("confirm", password):
+        flash("Those passwords don't match.")
+        return redirect(url_for("accounts"))
+    try:
+        people = add_user(load_users(), request.form.get("username", ""), password,
+                          request.form.get("role", ""), request.form.get("professor", ""))
+        save_users(people)
+        flash(f"Added {request.form.get('username', '').strip()}.")
+    except UserError as exc:
+        flash(str(exc))
+    return redirect(url_for("accounts"))
+
+
+@app.route("/accounts/remove", methods=["POST"])
+@role_required(ADVISOR)
+@limiter.limit("60/hour")
+def accounts_remove():
+    username = request.form.get("username", "")
+    me = (current_user() or {}).get("username")
+    if username == me:
+        # Removing the last advisor would drop the app back to no-login mode
+        # for everyone; removing yourself is the usual way to do it by accident.
+        flash("You can't remove the account you're signed in with.")
+        return redirect(url_for("accounts"))
+    try:
+        save_users(remove_user(load_users(), username))
+        flash(f"Removed {username}.")
+    except UserError as exc:
+        flash(str(exc))
+    return redirect(url_for("accounts"))
+
+
 def _ext_ok(filename: str, allowed: set) -> bool:
     return os.path.splitext(filename)[1].lower() in allowed
 
@@ -274,15 +583,229 @@ def _student_record(cas_id: str) -> Dict[str, Any]:
 
 @app.route("/")
 def index():
-    summaries = _summaries()
-    quarantine = _store().quarantine()
-    flagged = sum(1 for s in summaries if s.get("warnings"))
-    return render_template("index.html", summaries=summaries,
-                           quarantine=quarantine, flagged=flagged)
+    """Where a login lands. A professor only ever has their own queue, so send
+    them straight to it rather than to a dashboard about other people's work."""
+    user = current_user()
+    if user and user["role"] == PROFESSOR:
+        return redirect(url_for("professor_home"))
+    entries = _summaries()
+    professors = load_professors()
+    board, unassigned = queues(entries, professors)
+    for prof in board:
+        prof["assigned"] = assigned_to(entries, prof["id"])
+        prof["waiting"] = [e for e in prof["assigned"] if not e.get("professor_status")]
+        prof["accepted"] = [e for e in prof["assigned"]
+                            if e.get("professor_status") == "accept"]
+        prof["rejected"] = [e for e in prof["assigned"]
+                            if e.get("professor_status") == "reject"]
+    return render_template(
+        "dashboard.html", professors=board, unassigned=unassigned,
+        total=len(entries), tbd=len(deck(entries)),
+        reviewed=len(decided(entries)),
+        shortlist=len(shortlisted(entries)),
+        answered=sum(1 for e in entries if e.get("professor_status")))
+
+
+@app.route("/step/1")
+@role_required(ADVISOR)
+def step_upload():
+    """Step 1 — upload only. Deliberately shows no summaries: a card before the
+    status pass is reading the reviewer hasn't asked for yet."""
+    store = _store()
+    entries = store.index()
+    return render_template("step_upload.html", count=len(entries),
+                           coverage=degree_coverage(entries) if entries else None,
+                           quarantine=len(store.quarantine()))
+
+
+# ------------------------------------------------------------- professors --
+
+def _my_professor_id() -> str:
+    """Which professor the session is. With no accounts configured there is one
+    operator, so fall back to the id in the URL query for a quick local look."""
+    user = current_user()
+    if user and user["role"] == PROFESSOR:
+        return user["professor"]
+    return request.args.get("as") or ""
+
+
+@app.route("/prof")
+def professor_home():
+    """A professor's own deck: the students the advisor handed them."""
+    prof_id = _my_professor_id()
+    prof = professor_by_id(prof_id)
+    if not prof:
+        # No account and no ?as= — offer the list rather than a blank page.
+        return render_template("prof_pick.html", professors=load_professors())
+    entries = _summaries()
+    mine = assigned_to(entries, prof_id)
+    waiting = professor_deck(entries, prof_id)
+    cards = [dict(e, card_text=condense_card(e.get("summary_text", "")))
+             for e in waiting[:DECK_BATCH]]
+    shown, page, pages = _page_of(mine, request.args.get("page", 1, type=int))
+    return render_template("prof_deck.html", professor=prof, cards=cards,
+                           mine=shown, queue_total=len(mine), page=page, pages=pages,
+                           remaining=len(waiting) - len(cards),
+                           accepted=[e for e in mine if e.get("professor_status") == "accept"],
+                           rejected=[e for e in mine if e.get("professor_status") == "reject"])
+
+
+@app.route("/prof/decide", methods=["POST"])
+@limiter.limit("600/hour")
+def professor_decide():
+    prof_id = _my_professor_id()
+    cas_id = request.form.get("cas_id", "")
+    decision = request.form.get("decision", "")
+    if decision not in PROF_DECISIONS:
+        abort(400, description="Unknown decision.")
+    entry = next((e for e in _summaries() if e["cas_id"] == cas_id), None)
+    if not entry:
+        abort(404)
+    # A professor may only rule on their own queue — the id comes from the
+    # session, so a copied link to someone else's student changes nothing.
+    if entry.get("assigned_to") != prof_id:
+        abort(403, description="That applicant isn't in your queue.")
+    updated = _store().update(cas_id,
+                              lambda u: apply_professor_decision(u, decision),
+                              create=False)
+    return {"cas_id": cas_id, "professor_status": updated.get("professor_status", "")}
+
+
+@app.route("/step/2")
+@role_required(ADVISOR)
+def step_sheet():
+    """Step 2 — download the roster with the degree column and a blank status."""
+    store = _store()
+    entries = store.index()
+    return render_template("step_sheet.html", count=len(entries),
+                           coverage=degree_coverage(entries) if entries else None)
+
+
+@app.route("/step/3")
+@role_required(ADVISOR)
+def step_status():
+    """Step 3 — take the marked-up spreadsheet back."""
+    entries = _summaries()
+    return render_template("step_status.html",
+                           marked=sum(1 for e in entries if e.get("review_status")),
+                           tbd=len(deck(entries)))
+
+
+@app.route("/step/3", methods=["POST"], endpoint="step_status_post")
+@limiter.limit("30/hour")
+@role_required(ADVISOR)
+def step_status_upload():
+    """The marked-up sheet (and optionally more packets) coming back in."""
+    sheet = request.files.get("csv")
+    if not sheet or not sheet.filename:
+        flash("Choose the spreadsheet with the status column filled in.")
+        return redirect(url_for("step_status"))
+    if not _ext_ok(sheet.filename, CSV_EXTS):
+        flash(f"Unsupported file type — use {', '.join(sorted(CSV_EXTS))}.")
+        return redirect(url_for("step_status"))
+
+    dest = os.path.join(DATA, "raw", _safe_name(sheet.filename, "reviewed.xlsx"))
+    if not _save_upload(sheet, dest):
+        flash("That file's contents don't match its extension — refused.")
+        return redirect(url_for("step_status"))
+
+    packets = [f for f in request.files.getlist("zip") if f and f.filename]
+    bad = [f.filename for f in packets if not _ext_ok(f.filename, PACKET_EXTS)]
+    staged, refused = ([], []) if bad else _stage_packets(packets)
+    back_url, deck_url = url_for("step_status"), url_for("triage")
+
+    def work(progress):
+        msgs = []
+        progress.stage("Reading the spreadsheet")
+        try:
+            s = run(dest, DATA, FIELD_MAP)
+            msgs.append(f"Read {s['rows']} row(s).")
+        except Exception as exc:
+            app.logger.exception("Error processing the marked-up spreadsheet")
+            return {"message": f"Error reading the spreadsheet: {exc}",
+                    "next": back_url}
+        if bad:
+            msgs.append(f"Packets must be .zip or .pdf — skipped {', '.join(bad[:3])}.")
+        if refused:
+            msgs.append(f"Refused (contents don't match the extension): {', '.join(refused)}.")
+        if staged:
+            msgs.append(_ingest_staged_packets(staged, progress))
+
+        entries = _summaries()
+        marked = sum(1 for e in entries if e.get("review_status"))
+        tbd = len(deck(entries))
+        if not marked:
+            msgs.append("No status values were recognized — check the 'status' column "
+                        "says accept, reject or tbd.")
+        else:
+            msgs.append(f"{marked} marked, {tbd} tbd to read.")
+        return {"message": " ".join(msgs), "next": deck_url if tbd else back_url}
+
+    if _wants_json():
+        return {"job": jobs.start(work, "Starting")}
+
+    result = work(jobs.Progress("sync"))
+    flash(result["message"])
+    return redirect(result["next"])
+
+
+@app.route("/download/status.xlsx")
+@role_required(ADVISOR)
+def download_status():
+    """Every applicant, every verdict, one row each — for circulating."""
+    entries = _summaries()
+    if not entries:
+        flash("No applicants yet — upload a file first.")
+        return redirect(url_for("index"))
+    path = os.path.join(DATA, "reports", "applicant_status.xlsx")
+    write_status_report(entries, load_professors(), path)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return send_file(path, as_attachment=True,
+                     download_name=f"applicant_status_{stamp}.xlsx")
+
+
+# One page of applicant cards. Each card carries a full summary, so rendering
+# every one of five thousand produced a 19 MB page — fast on the server, hostile
+# in a browser.
+PAGE_SIZE = 50
+
+# Cards sent to a deck at a time; the browser fetches more as it runs down.
+DECK_BATCH = 25
+
+
+def _page_of(items, page: int, size: int = PAGE_SIZE):
+    """(slice, page, pages) with the page clamped into range."""
+    pages = max(1, (len(items) + size - 1) // size)
+    page = min(max(page, 1), pages)
+    start = (page - 1) * size
+    return items[start:start + size], page, pages
+
+
+@app.route("/applicants")
+@role_required(ADVISOR)
+def applicants():
+    """Everyone on file, decided or not — the browse view, off the main flow."""
+    store = _store()
+    entries = store.index()
+    quarantine = store.quarantine()
+    flagged = sum(1 for s in entries if s.get("warnings"))
+    # How much of the degree column the packets could actually fill — an empty
+    # cell means "no packet" or "packet names no degree", never a silent failure.
+    coverage = degree_coverage(entries) if entries else None
+    # Same person under two ids reads as two applicants unless it's called out.
+    dupes = likely_duplicate_groups(entries)
+    dupe_ids = {m["cas_id"]: [x["cas_id"] for x in g if x["cas_id"] != m["cas_id"]]
+                for g in dupes for m in g}
+    shown, page, pages = _page_of(entries, request.args.get("page", 1, type=int))
+    return render_template("applicants.html", summaries=shown, coverage=coverage,
+                           quarantine=quarantine, flagged=flagged, dupes=dupes,
+                           dupe_ids=dupe_ids, tbd_count=len(deck(entries)),
+                           total=len(entries), page=page, pages=pages)
 
 
 @app.route("/upload", methods=["POST"])
 @limiter.limit("30/hour")
+@role_required(ADVISOR)
 def upload():
     file = request.files.get("csv")
     if not file or not file.filename:
@@ -291,7 +814,7 @@ def upload():
     if not _ext_ok(file.filename, CSV_EXTS):
         flash(f"Unsupported file type — use {', '.join(sorted(CSV_EXTS))}.")
         return redirect(url_for("index"))
-    fname = secure_filename(file.filename) or "upload.csv"
+    fname = _safe_name(file.filename, "upload.csv")
     dest = os.path.join(DATA, "raw", fname)
     if not _save_upload(file, dest):
         flash("That file's contents don't match its extension — refused.")
@@ -345,6 +868,7 @@ def _clear_processed(purge_raw: bool = False) -> int:
 
 @app.route("/reset", methods=["POST"])
 @limiter.limit("30/hour")
+@role_required(ADVISOR)
 def reset():
     """Clear all processed students (start fresh). Raw uploads are kept
     unless the 'purge_raw' checkbox was submitted -- check it to actually
@@ -355,12 +879,15 @@ def reset():
     if purge:
         msg += " Raw uploaded files were also deleted."
     msg += " Upload to start fresh."
+    if _wants_json():
+        return {"message": msg, "cleared": n}
     flash(msg)
     return redirect(url_for("index"))
 
 
 @app.route("/process", methods=["GET", "POST"])
 @limiter.limit("30/hour", methods=["POST"])
+@role_required(ADVISOR)
 def process():
     """Handle the CSV/Excel and/or the ZIP in one submit. CSV is processed first
     (creates the application sections), then the ZIP merges resume/SOP into the
@@ -368,59 +895,166 @@ def process():
     if request.method == "GET":
         return redirect(url_for("index"))
     csv_file = request.files.get("csv")
-    zip_file = request.files.get("zip")
+    # Packets arrive as a ZIP, as loose PDFs, or as several of either — a
+    # reviewer with a folder of packets shouldn't have to zip it first.
+    packet_files = [f for f in request.files.getlist("zip") if f and f.filename]
     has_csv = bool(csv_file and csv_file.filename)
-    has_zip = bool(zip_file and zip_file.filename)
-    if not has_csv and not has_zip:
-        flash("Choose a CSV/Excel file, a ZIP, or both.")
+    has_packets = bool(packet_files)
+    if not has_csv and not has_packets:
+        flash("Choose a CSV/Excel file, packets (ZIP or PDFs), or both.")
         return redirect(url_for("index"))
 
     if has_csv and not _ext_ok(csv_file.filename, CSV_EXTS):
         flash(f"Application data file type not supported — use {', '.join(sorted(CSV_EXTS))}.")
         return redirect(url_for("index"))
-    if has_zip and not _ext_ok(zip_file.filename, ZIP_EXTS):
-        flash("The packets file must be a .zip.")
+    bad = [f.filename for f in packet_files if not _ext_ok(f.filename, PACKET_EXTS)]
+    if bad:
+        flash(f"Packets must be .zip or .pdf — {', '.join(bad[:3])} isn't.")
         return redirect(url_for("index"))
 
-    msgs = []
+    # Read the uploads to disk here, on the request thread: a Werkzeug file
+    # stream doesn't outlive the request, so a worker thread would find it
+    # closed. Only the slow part (parsing, OCR) moves to the background.
     if request.form.get("replace"):
-        msgs.append(f"Cleared {_clear_processed()} old record(s).")
+        _clear_processed()
+    csv_path = None
+    saved_packets, refused = [], []
     if has_csv:
-        dest = os.path.join(DATA, "raw", secure_filename(csv_file.filename) or "upload.csv")
-        if not _save_upload(csv_file, dest):
-            msgs.append("Application data: file contents don't match its extension — refused.")
-        else:
+        csv_path = os.path.join(DATA, "raw", _safe_name(csv_file.filename, "upload.csv"))
+        if not _save_upload(csv_file, csv_path):
+            csv_path = None
+            refused.append("the application data file")
+    if has_packets:
+        saved_packets, bad_sniff = _stage_packets(packet_files)
+        refused += bad_sniff
+
+    # Resolve URLs here: the worker runs off the request thread, where Flask's
+    # url_for has no application context to look them up in.
+    next_url = url_for("step_sheet")
+
+    def work(progress):
+        msgs = []
+        if refused:
+            msgs.append(f"Refused (contents don't match the extension): {', '.join(refused)}.")
+        if csv_path:
+            progress.stage("Reading the spreadsheet")
             try:
-                s = run(dest, DATA, FIELD_MAP)
-                msgs.append(f"Application data: {s['valid']} summarized, {s['quarantined']} quarantined.")
+                s = run(csv_path, DATA, FIELD_MAP)
+                msgs.append(f"Application data: {s['valid']} summarized, "
+                            f"{s['quarantined']} quarantined.")
             except Exception as exc:
                 app.logger.exception("Error processing application data in /process")
                 msgs.append(f"Application data error: {exc}")
-    if has_zip:
-        dest = os.path.join(DATA, "raw", secure_filename(zip_file.filename) or "packets.zip")
-        if not _save_upload(zip_file, dest):
-            msgs.append("Packets: file contents don't match its extension — refused.")
+        if saved_packets:
+            msgs.append(_ingest_staged_packets(saved_packets, progress))
+        message = " ".join(msgs)
+        return {"message": message, "next": next_url}
+
+    if _wants_json():
+        return {"job": jobs.start(work, "Starting")}
+
+    result = work(jobs.Progress("sync"))          # no JS: do it inline as before
+    flash(result["message"])
+    return redirect(url_for("step_sheet") if _store().count() else url_for("index"))
+
+
+def _wants_json() -> bool:
+    """True when the browser asked by fetch rather than by navigating.
+
+    Every route below keeps its redirect-and-flash behaviour for a plain form
+    post, so the app still works with JavaScript off — and so the test suite
+    can drive it without simulating fetch.
+    """
+    return (request.headers.get("X-Requested-With") == "fetch"
+            or request.accept_mimetypes.best == "application/json")
+
+
+@app.route("/jobs/<job_id>")
+def job_status(job_id: str):
+    """Poll a background ingest: what it's reading now, and how far in."""
+    job = jobs.get(job_id)
+    if not job:
+        abort(404)
+    total, done_count = job.get("total") or 0, job.get("done_count") or 0
+    return {
+        "done": job["done"],
+        "label": job.get("label") or "",
+        "count": done_count,
+        "total": total,
+        "percent": round(100 * done_count / total) if total else (100 if job["done"] else 0),
+        "error": job.get("error"),
+        "message": (job.get("result") or {}).get("message") if isinstance(job.get("result"), dict) else None,
+        "next": (job.get("result") or {}).get("next") if isinstance(job.get("result"), dict) else None,
+    }
+
+
+def _packet_report(r: Dict[str, Any]) -> str:
+    m = (f"Packets: {r['pdfs_found']} PDF(s) → updated {r['students_updated']} student(s), "
+         f"added {r['sections_added']} section(s), captured "
+         f"{r['score_sections']} score/transcript section(s).")
+    if r.get("scanned_docs"):
+        m += f" OCR read {r['ocr_pages']} scanned page(s) across {r['scanned_docs']} document(s)."
+    if r.get("ocr_unavailable_docs"):
+        m += f" ⚠ {r['ocr_unavailable_docs']} document(s) had scanned pages but OCR isn't installed."
+    if r["unmatched_files"]:
+        m += f" {len(r['unmatched_files'])} unmatched."
+    return m
+
+
+def _stage_packets(files):
+    """Write the uploaded packets to disk and return their paths.
+
+    Saving happens on the request thread because an upload stream is closed the
+    moment the request ends — a worker thread would find nothing to read. Each
+    upload gets its own timestamped folder, so a later upload doesn't re-read
+    (and re-OCR) every packet ever sent.
+    """
+    batch = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stage_dir = os.path.join(DATA, "raw", "packets", batch)
+    saved, refused = [], []
+    for f in files:
+        name = _safe_name(f.filename, "packet.pdf")
+        is_zip = os.path.splitext(name)[1].lower() == ".zip"
+        dest = os.path.join(DATA, "raw", name) if is_zip else os.path.join(stage_dir, name)
+        if _save_upload(f, dest):
+            saved.append(dest)
         else:
-            try:
-                r = ingest_zip(dest, DATA)
-                m = (f"Packets: {r['pdfs_found']} PDF(s) → updated {r['students_updated']} student(s), "
-                     f"added {r['sections_added']} section(s), captured {r['score_sections']} score/transcript section(s).")
-                if r.get("scanned_docs"):
-                    m += f" OCR read {r['ocr_pages']} scanned page(s) across {r['scanned_docs']} document(s)."
-                if r.get("ocr_unavailable_docs"):
-                    m += f" ⚠ {r['ocr_unavailable_docs']} document(s) had scanned pages but OCR isn't installed."
-                if r["unmatched_files"]:
-                    m += f" {len(r['unmatched_files'])} unmatched."
-                msgs.append(m)
-            except Exception as exc:
-                app.logger.exception("Error processing packets ZIP in /process")
-                msgs.append(f"Packets error: {exc}")
-    flash(" ".join(msgs))
-    return redirect(url_for("index"))
+            refused.append(f.filename)
+    return saved, refused
+
+
+def _ingest_staged_packets(paths, progress=None) -> str:
+    """Merge already-saved packets — ZIPs and loose PDFs down the same path."""
+    totals = {"pdfs_found": 0, "students_updated": 0, "sections_added": 0,
+              "score_sections": 0, "unmatched_files": [], "scanned_docs": 0,
+              "ocr_pages": 0, "ocr_unavailable_docs": 0}
+
+    def _add(report):
+        for k, v in report.items():
+            if k in totals:
+                totals[k] += v
+
+    notes = []
+    zips = [p for p in paths if p.lower().endswith(".zip")]
+    loose = [p for p in paths if not p.lower().endswith(".zip")]
+    for path in zips:
+        try:
+            _add(ingest_zip(path, DATA, progress))
+        except Exception as exc:
+            app.logger.exception("Error processing a packets ZIP")
+            notes.append(f"{os.path.basename(path)}: {exc}")
+    if loose:
+        try:
+            _add(ingest_packet_folder(os.path.dirname(loose[0]), DATA, progress))
+        except Exception as exc:
+            app.logger.exception("Error processing loose packet PDFs")
+            notes.append(f"Loose PDFs: {exc}")
+    return " ".join([_packet_report(totals)] + notes)
 
 
 @app.route("/upload_zip", methods=["POST"])
 @limiter.limit("30/hour")
+@role_required(ADVISOR)
 def upload_zip():
     file = request.files.get("zip")
     if not file or not file.filename:
@@ -429,7 +1063,7 @@ def upload_zip():
     if not _ext_ok(file.filename, ZIP_EXTS):
         flash("The packets file must be a .zip.")
         return redirect(url_for("index"))
-    dest = os.path.join(DATA, "raw", secure_filename(file.filename) or "packets.zip")
+    dest = os.path.join(DATA, "raw", _safe_name(file.filename, "packets.zip"))
     if not _save_upload(file, dest):
         flash("That file's contents don't match its extension — refused.")
         return redirect(url_for("index"))
@@ -449,6 +1083,7 @@ def upload_zip():
 
 @app.route("/upload_document", methods=["POST"])
 @limiter.limit("60/hour")
+@role_required(ADVISOR)
 def upload_document():
     file = request.files.get("doc")
     doc_type = (request.form.get("type") or "").strip()
@@ -463,7 +1098,7 @@ def upload_document():
     if not _ext_ok(file.filename, DOC_EXTS):
         flash(f"Unsupported file type — use {', '.join(sorted(DOC_EXTS))}.")
         return redirect(url_for("index"))
-    fname = secure_filename(file.filename)
+    fname = _safe_name(file.filename, "document")
     cas_id = cas_id or infer_cas_id(fname)
     if not cas_id:
         flash("Could not determine cas_id — enter it, or name the file '<cas_id>_sop.pdf'.")
@@ -481,7 +1116,7 @@ def upload_document():
         return redirect(url_for("index"))
     try:
         _, words = ingest_document(dest, cas_id, doc_type, DATA, recommender=recommender)
-        reindex(DATA, changed={cas_id})
+        reindex(DATA, changed={cas_id}, reconcile=False, write_report=False)
         flash(f"Added {doc_type} ({words} words) to {cas_id}.")
     except Exception as exc:
         app.logger.exception("Error reading document for %s in /upload_document", cas_id)
@@ -489,18 +1124,237 @@ def upload_document():
     return redirect(url_for("student", cas_id=cas_id))
 
 
+@app.route("/review-sheet")
+@role_required(ADVISOR)
+def review_sheet():
+    """Step 1 of the review pass: the roster with the undergrad degree filled in
+    and a blank status column to mark up."""
+    entries = _summaries()
+    if not entries:
+        flash("No applicants yet — upload a file first.")
+        return redirect(url_for("index"))
+    out = os.path.join(DATA, "reports", "applicants_review.xlsx")
+    try:
+        write_review_sheet(entries, os.path.join(DATA, "raw"), out)
+    except Exception as exc:
+        app.logger.exception("Error building the review spreadsheet")
+        flash(f"Could not build the review spreadsheet: {exc}")
+        return redirect(url_for("index"))
+    return send_file(out, as_attachment=True, download_name="applicants_review.xlsx")
+
+
 @app.route("/summaries")
+@role_required(ADVISOR)
 def summaries():
-    return render_template("summaries.html", summaries=_summaries())
+    """The reviewed set: what you shortlisted or rejected in the deck."""
+    entries = _summaries()
+    reviewed = decided(entries)
+    shown, page, pages = _page_of(reviewed, request.args.get("page", 1, type=int))
+    return render_template("summaries.html", summaries=shown, total=len(entries),
+                           reviewed=len(reviewed), page=page, pages=pages,
+                           kept=sum(1 for e in reviewed if e.get("triage") == "shortlist"),
+                           waiting=len(deck(entries)))
 
 
 @app.route("/download/summaries")
+@role_required(ADVISOR)
 def download_summaries():
-    path = os.path.join(DATA, "reports", "_summaries.md")
-    if not os.path.exists(path):
-        flash("No summaries yet — upload a file first.")
+    """Built fresh on the way out. A swipe changes what belongs in the report
+    but doesn't re-run the pipeline, so the cached file on disk goes stale the
+    moment you triage anything."""
+    entries = _summaries()
+    if not entries:
+        flash("No applicants yet — upload a file first.")
         return redirect(url_for("index"))
+    path = os.path.join(DATA, "reports", "_summaries.md")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(summaries_markdown(entries))
     return send_file(path, as_attachment=True, download_name="applicant_summaries.md")
+
+
+@app.route("/triage")
+@role_required(ADVISOR)
+def triage():
+    """The swipe pass: one card per tbd applicant, right to shortlist, left to
+    reject."""
+    entries = _summaries()
+    waiting = deck(entries)
+    # Only a batch reaches the browser. Every tbd card in the DOM at once was
+    # 9 MB of HTML at five thousand applicants, and you can only read the top
+    # one — the rest arrive as you work through them.
+    cards = [dict(e, card_text=condense_card(e.get("summary_text", "")))
+             for e in waiting[:DECK_BATCH]]
+    return render_template("triage.html", cards=cards, professors=load_professors(),
+                           shortlist_count=len(shortlisted(entries)),
+                           remaining=len(waiting) - len(cards),
+                           total_tbd=sum(1 for e in entries
+                                         if e.get("review_status") == "tbd"))
+
+
+@app.route("/triage/cards")
+@role_required(ADVISOR)
+def triage_cards():
+    """The next batch of deck cards, as HTML the page appends."""
+    waiting = deck(_summaries())
+    seen = set(request.args.getlist("seen"))
+    nxt = [e for e in waiting if e["cas_id"] not in seen][:DECK_BATCH]
+    cards = [dict(e, card_text=condense_card(e.get("summary_text", "")))
+             for e in nxt]
+    return {"html": render_template("_deck_cards.html", cards=cards,
+                                    professors=load_professors()),
+            "remaining": max(0, len(waiting) - len(seen) - len(cards))}
+
+
+@app.route("/triage/swipe", methods=["POST"])
+@limiter.limit("600/hour")
+@role_required(ADVISOR)
+def triage_swipe():
+    """A swipe, optionally naming the professor to hand them to.
+
+    Picking the professor on the card saves a second pass through the
+    shortlist; leaving it blank is fine, they just land there unassigned.
+    """
+    cas_id = request.form.get("cas_id", "")
+    direction = request.form.get("direction", "")
+    prof_id = request.form.get("professor", "")
+    if direction not in SWIPES:
+        abort(400, description="Unknown swipe direction.")
+    if prof_id and not professor_by_id(prof_id):
+        abort(400, description="Unknown professor.")
+
+    def _apply(unified):
+        apply_swipe(unified, direction)
+        if direction == "shortlist" and prof_id:
+            assign(unified, prof_id)
+        return unified
+
+    updated = _store().update(cas_id, _apply, create=False)
+    if updated is None:
+        abort(404)
+    return {"cas_id": cas_id, "triage": updated.get("triage", ""),
+            "review_status": updated.get("review_status", ""),
+            "assigned_to": updated.get("assigned_to", "")}
+
+
+@app.route("/triage/shortlist")
+@role_required(ADVISOR)
+def triage_shortlist():
+    """What survived the swipe, and which professor each one goes to."""
+    professors = load_professors()
+    entries = shortlisted(_summaries())
+    for e in entries:
+        e["professor"] = professor_by_id(e.get("assigned_to", ""), professors)
+    return render_template("shortlist.html", applicants=entries,
+                           professors=professors,
+                           remaining=len(deck(_summaries())))
+
+
+@app.route("/triage/assign", methods=["POST"])
+@limiter.limit("600/hour")
+@role_required(ADVISOR)
+def triage_assign():
+    cas_id = request.form.get("cas_id", "")
+    prof_id = request.form.get("professor", "")
+    professors = load_professors()
+    if prof_id and not professor_by_id(prof_id, professors):
+        abort(400, description="Unknown professor.")
+    updated = _store().update(cas_id, lambda u: assign(u, prof_id), create=False)
+    if updated is None:
+        abort(404)
+    who = updated.get("identity", {}).get("full_name", cas_id)
+    to = (professor_by_id(prof_id, professors) or {}).get("name", "nobody")
+    message = f"{who} → {to}"
+    if _wants_json():
+        return {"message": message, "cas_id": cas_id, "professor": prof_id, "name": to}
+    flash(message)
+    return redirect(url_for("triage_shortlist"))
+
+
+@app.route("/professors")
+@role_required(ADVISOR)
+def professors_view():
+    """Each professor's review queue, and the list itself."""
+    profs, unassigned = queues(_summaries(), load_professors())
+    return render_template("professors.html", professors=profs, unassigned=unassigned,
+                           editing=request.args.get("edit") == "1")
+
+
+def _save_professors(professors, message: str):
+    """Persist an edited faculty list and report back."""
+    try:
+        save_professors(professors)
+    except OSError as exc:
+        app.logger.exception("Could not write the professor list")
+        message = f"Could not save the professor list: {exc}"
+        if _wants_json():
+            return {"message": message, "error": True}, 500
+    if _wants_json():
+        return {"message": message}
+    flash(message)
+    return redirect(url_for("professors_view", edit=1))
+
+
+def _professor_error(exc):
+    if _wants_json():
+        return {"message": str(exc), "error": True}, 400
+    flash(str(exc))
+    return redirect(url_for("professors_view", edit=1))
+
+
+@app.route("/professors/add", methods=["POST"])
+@limiter.limit("120/hour")
+@role_required(ADVISOR)
+def professors_add():
+    name = request.form.get("name", "")
+    try:
+        professors = add_professor(load_professors(), name,
+                                   request.form.get("url", ""),
+                                   request.form.get("areas", ""))
+    except ProfessorError as exc:
+        return _professor_error(exc)
+    return _save_professors(professors, f"Added {name.strip()}.")
+
+
+@app.route("/professors/update", methods=["POST"])
+@limiter.limit("120/hour")
+@role_required(ADVISOR)
+def professors_update():
+    prof_id = request.form.get("id", "")
+    try:
+        professors = update_professor(load_professors(), prof_id,
+                                      name=request.form.get("name", ""),
+                                      url=request.form.get("url", ""),
+                                      areas=request.form.get("areas", ""))
+    except ProfessorError as exc:
+        return _professor_error(exc)
+    return _save_professors(professors, "Saved.")
+
+
+@app.route("/professors/delete", methods=["POST"])
+@limiter.limit("120/hour")
+@role_required(ADVISOR)
+def professors_delete():
+    """Remove a professor, and unassign anyone left in their queue so no record
+    points at an id that no longer exists."""
+    prof_id = request.form.get("id", "")
+    professors = load_professors()
+    gone = professor_by_id(prof_id, professors)
+    try:
+        remaining = remove_professor(professors, prof_id)
+    except ProfessorError as exc:
+        return _professor_error(exc)
+
+    store = _store()
+    freed = [e["cas_id"] for e in store.index() if e.get("assigned_to") == prof_id]
+    for cas_id in freed:
+        store.update(cas_id, lambda u: assign(u, ""), create=False)
+
+    note = f"Removed {(gone or {}).get('name', prof_id)}."
+    if freed:
+        note += (f" {len(freed)} applicant(s) went back to the shortlist, "
+                 "unassigned.")
+    return _save_professors(remaining, note)
 
 
 @app.route("/student/<cas_id>")

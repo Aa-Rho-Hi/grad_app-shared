@@ -120,10 +120,90 @@ network. Two properties matter:
   relocated to a local working directory (the human-readable report still writes
   to the chosen folder) and a one-line notice is printed.
 
+## Scale
+
+Designed for one intake at a time, and measured rather than assumed —
+`tests/loadtest.py` builds a synthetic cohort and times every page. The rule
+that keeps it honest: **a request may not do per-applicant work across the whole
+cohort.** Three mechanisms enforce it.
+
+- **The index is the read model.** `Store._index_entry` caches everything a list
+  view or an export needs — name, email, metrics, the derived undergrad degree,
+  which documents exist, the originating roster file, and a MinHash sketch of the
+  SOP. Pages and exports read that; full records (which carry whole essays) are
+  only loaded for one applicant at a time.
+- **Lists are paginated, decks are batched.** 50 cards a page; 25 in a deck with
+  more fetched as the reviewer works down.
+- **Batch operations stay batch.** Reconciliation and the report rebuild run once
+  per ingest, not once per document.
+
+Where it would stop: SQLite on one machine, single process. The quadratic paths
+are gone but the duplicate-SOP scan is still O(n) per document — fine for a few
+thousand, wants a real index past that.
+
+## The review pass
+
+Summarizing every applicant is wasted reading when most of them are decided on
+the numbers. The flow puts a human triage step in the middle:
+
+1. **Enrich** — `review.write_review_sheet` writes `reports/applicants_review.xlsx`:
+   the reviewer's own roster, every column intact, with `undergrad_degree` filled
+   in from the packet and a blank `status` column (accept / reject / tbd
+   dropdown) inserted after the identity columns. The original upload is never
+   modified. A "How to review" sheet carries the legend — a sample row would be
+   re-ingested as a real applicant on the way back in.
+2. **Decide** — the reviewer marks each row in Excel and re-uploads the file
+   through the normal upload path.
+3. **Narrow** — `review.status_from_row` reads the column back onto the
+   record (stored as `review_status`, so it never collides with the roster's own
+   `local_status_*`); the summaries page and `_summaries.md` then show only `tbd`
+   applicants. Before anyone is marked nothing is hidden, so a roster that
+   hasn't been reviewed yet still behaves as it always did.
+
+`undergrad_degree` reads the packet only — the résumé's parsed education block,
+then the résumé text, then the transcript — and prefers a line that names the
+field of study over one that just names the credential ("B.Tech (Electrical
+Engineering)" over "Bachelor of Eng."). The roster's `custom_field_background`
+is a field of study, not a degree, and is blank for a third of the sample rows;
+filling the column from it would put a guess where a reviewer reads fact, so
+with no packet the cell stays empty.
+
+## The swipe pass and the professor queues
+
+After the spreadsheet narrows the pool to `tbd`, `triage.py` is the second read:
+one card per applicant, sized to a single screen, swipe right to shortlist and
+left to reject (`/triage`). What survives goes to exactly one professor's queue
+from `config/professors.yaml` (`/triage/shortlist` → `/professors`).
+
+Two fields, kept apart on purpose:
+
+| Field | Set by | Meaning |
+|---|---|---|
+| `review_status` | the spreadsheet's `status` column | accept / reject / tbd |
+| `triage` | a swipe | shortlist / reject |
+| `assigned_to` | the shortlist page | one professor id |
+
+A left swipe writes both (`triage=reject` **and** `review_status=reject`), so
+the applicant leaves the tbd pool. A right swipe only sets `triage`, leaving the
+spreadsheet's own verdict alone. `undo` restores `review_status` to tbd, which is
+only safe because the deck contains nothing else.
+
+`/summaries` and `reports/_summaries.md` show `triage.decided()` — the swiped set, shortlisted then rejected. Extracting a card for everyone is cheap; making a human read all of them is not, and an export nobody opens is worse than no export. The download is regenerated per request, since a swipe changes the report without re-running the pipeline.
+
+The deck card is `triage.condense_card()` — a trim of the *rendered* summary
+(header, then Background / Experience / Projects / In their words / Letters,
+capped at a couple of items each), not a second renderer. One place decides what
+a summary says; this only decides how much of it fits on screen.
+
 ## Output
 
-- **`template.py`** — renders a neutral factual summary per student from whatever sources are present (gets richer as documents are added). Surfaces SOP-detected areas/skills with an explicit "keyword detection, not interpretation" caveat.
-- **`app.py`** (Flask) — upload CSV/Excel; attach a single SOP/LOR/resume per student; upload a ZIP of combined packets; a combined `/process` route that takes a CSV **and** a ZIP in one submit (CSV first, then packets merge by `cas_id`); a `/reset` route to clear processed data (optionally purging raw uploads too); browse applicants; per-student detail (identity, programs, education, test scores, sources-on-file, document analysis); data-to-verify flags; quarantine view; written summaries; download. No login by default (single-reviewer, localhost tool) but ships with upload-size caps, extension allow-lists, a same-origin/CSRF check, and opt-in Basic Auth / remote-binding guards — see "Security & privacy guardrails" in `README.md`.
+- **`status_report.py`** — the advisor's .xlsx export: one row per applicant carrying all three verdicts (spreadsheet `status`, advisor `triage`, `professor_status`) plus the professor's name, and a per-professor tally sheet. `rows_for()`/`summarize()` are plain data so the shape can be tested without openpyxl. Values, not formulas: a snapshot that silently recalculated after an edit would misreport what was true when it was taken.
+- **`users.py`** — accounts and roles. Login is off until `config/users.yaml` has an entry, which keeps the single-reviewer setup working and makes the switch explicit; passwords are PBKDF2 hashes. `advisor` reaches the whole flow, `professor` only their own queue. Role checks return 403 rather than redirecting, and a professor's decision route re-checks `assigned_to` server-side so a copied link changes nothing.
+- **`jobs.py`** — a one-process background job registry so a long ingest can report progress. The upload posts by fetch, the page polls `/jobs/<id>`, and the packet ingester calls back per PDF. Nothing is persisted: a job that dies with the process is work the reviewer re-runs, and the records it already merged are in the store either way.
+- **`triage.py`** — the swipe pass: deck selection, swipe/undo semantics, the one-screen card, and the professor list (load/add/rename/delete, written back to `config/professors.yaml` atomically; ids are generated once and never rewritten so a rename can't empty a queue, and profile links are scheme-checked before they reach an `href`) with their queues.
+- **`review.py`** — the review pass above: degree extraction, status parsing and normalization (`Accept`, `deny`, `T` all land somewhere sensible; anything unrecognized is "undecided", never a guess), the `tbd` filter, and the openpyxl writer for the review workbook.
+- **`template.py`** — renders a neutral factual **summary card** per student from whatever sources are present (gets richer as documents are added): a three-line header (identity, the numbers, the program), then short `###` sections — Background, Experience, Projects, Notable, In their words, Letters, On file, Verify — with one clipped item per line. (Sections replaced the earlier one-`- Label:`-line-per-section layout, which joined a résumé's four experience bullets into a semicolon paragraph nobody could skim.) Surfaces SOP-detected areas/skills with an explicit "keyword detection, not interpretation" caveat. Long source sentences are clipped, never paraphrased — the full document text stays in the record. The text is valid Markdown, and `templates/_summary.html` re-renders the same plain text as headed sections for the web UI, so the `.md` download and the UI never diverge.
+- **`app.py`** (Flask) — a four-step flow, one screen each: `/` upload (roster + packets: a ZIP, loose PDFs, or a mix), `/step/2` download the roster with the degree column and a blank `status`, `/step/3` take the marked-up sheet back, `/triage` the swipe deck. Nothing is summarized before step 3, so the first screen is a plain upload page rather than a wall of cards. `/applicants` keeps the browse view (every applicant, decided or not) off the flow. Also: attach a single SOP/LOR/resume per student; a `/reset` route to clear processed data (optionally purging raw uploads too); per-student detail (identity, programs, education, test scores, sources-on-file, document analysis); data-to-verify flags; quarantine view; written summaries; download. No login by default (single-reviewer, localhost tool) but ships with upload-size caps, extension allow-lists, a same-origin/CSRF check, and opt-in Basic Auth / remote-binding guards — see "Security & privacy guardrails" in `README.md`.
 - **`run.py`** / **`add_document.py`** / **`ingest_zip.py`** — CLIs for the application path, single-document ingest, and ZIP-batch ingest. `run.py` also owns `reindex()` (rebuilds `students/_all.json` and `reports/_summaries.md`, and runs `reconcile`).
 
 ## Data-quality flags vs. quarantine

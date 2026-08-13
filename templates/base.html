@@ -5,61 +5,210 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Grad App{% endblock %}</title>
   <style>
+    /* One palette, referenced everywhere. Change a value here and the whole
+       app follows; a hardcoded hex in a template is a bug waiting to drift. */
     :root{
-      --bg:#f6f8fb; --card:#ffffff; --ink:#1f2a37; --muted:#5a6573;
-      --line:#e3e8ef; --accent:#2b6cb0;
-      --high:#2e9e57; --high-bg:#e7f6ed;
-      --mid:#c98a00; --mid-bg:#fdf3da;
-      --low:#c0392b; --low-bg:#fbe9e7;
+      --bg:#f4f6fa; --card:#ffffff; --ink:#141b26; --muted:#63708a;
+      --line:#e2e7f0; --line-strong:#cfd7e6;
+      --accent:#3d5afe; --accent-ink:#2f46cc; --accent-bg:#eef1ff;
+      --high:#0f8a5f; --high-bg:#e6f6ef; --high-line:#b6e4cf;
+      --mid:#a86a00;  --mid-bg:#fdf3dd;  --mid-line:#eeda9f;
+      --low:#c0392b;  --low-bg:#fdecea;  --low-line:#f3c7c1;
+      --shadow:0 1px 2px rgba(20,27,38,.05), 0 8px 24px rgba(20,27,38,.05);
+      --radius:12px;
     }
     *{box-sizing:border-box}
-    body{margin:0;font-family:Segoe UI,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink)}
-    a{color:var(--accent);text-decoration:none}
-    header{background:#13233a;color:#fff;padding:16px 28px}
-    header h1{margin:0;font-size:18px;font-weight:700}
-    header .sub{font-size:12px;color:#aebfd4}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+         background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased}
+    a{color:var(--accent-ink);text-decoration:none}
+    a:hover{text-decoration:underline}
+    header{background:linear-gradient(180deg,#151d2e,#101724);color:#fff;padding:16px 28px}
+    header h1{margin:0;font-size:18px;font-weight:700;letter-spacing:-.01em}
+    header .sub{font-size:12px;color:#94a3bd;margin-top:2px}
+    .hrow{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+    .who{display:flex;align-items:center;gap:10px;font-size:12.5px;color:#c3cede}
+    .who button{background:transparent;border:1px solid #3a4658;color:#dbe3ef;font-size:12px;padding:5px 11px}
+    .who button:hover{background:#20293a}
     .wrap{max-width:1080px;margin:24px auto;padding:0 20px}
-    .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:20px}
-    .flash{background:#eef6ff;border:1px solid #bcd9f5;color:#13344f;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:14px}
-    .chips{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0}
-    .chip{font-size:12px;padding:4px 10px;border-radius:999px;background:#eef1f6;color:var(--muted)}
-    .chip.s{background:var(--high-bg);color:var(--high)}
-    .chip.w{background:var(--low-bg);color:var(--low)}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+          padding:20px;margin-bottom:20px;box-shadow:var(--shadow)}
+    .flash{background:var(--accent-bg);border:1px solid #ccd5ff;color:#22307d;padding:10px 14px;
+           border-radius:10px;margin-bottom:16px;font-size:14px}
+    .chips{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+    .chip{font-size:12px;padding:4px 10px;border-radius:999px;background:#eef1f7;color:var(--muted);
+          border:1px solid transparent}
+    .chip.s{background:var(--high-bg);color:var(--high);border-color:var(--high-line)}
+    .chip.w{background:var(--low-bg);color:var(--low);border-color:var(--low-line)}
+    .chip.d-accept{background:var(--high-bg);color:var(--high);border-color:var(--high-line)}
+    .chip.d-reject{background:var(--low-bg);color:var(--low);border-color:var(--low-line)}
+    .chip.d-tbd{background:var(--mid-bg);color:var(--mid);border-color:var(--mid-line)}
     table{width:100%;border-collapse:collapse;font-size:14px}
     th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
-    th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);cursor:pointer;user-select:none}
-    tr:hover td{background:#fafbfd}
+    th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);user-select:none}
+    tr:hover td{background:#fafbfe}
     .badge{display:inline-block;min-width:46px;text-align:center;font-weight:700;padding:3px 8px;border-radius:8px;font-size:13px}
     .badge.high{background:var(--high-bg);color:var(--high)}
     .badge.mid{background:var(--mid-bg);color:var(--mid)}
     .badge.low{background:var(--low-bg);color:var(--low)}
-    .bar{height:8px;border-radius:6px;background:#eef1f6;overflow:hidden;min-width:120px}
-    .bar > i{display:block;height:100%;border-radius:6px}
+    .bar{height:8px;border-radius:6px;background:#eaeef6;overflow:hidden;min-width:120px}
+    .bar > i{display:block;height:100%;border-radius:6px;transition:width .25s ease}
     .bar.high > i{background:var(--high)} .bar.mid > i{background:var(--mid)} .bar.low > i{background:var(--low)}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
     .kv{font-size:14px;line-height:1.7}
     .kv b{color:var(--muted);font-weight:600}
     .muted{color:var(--muted);font-size:13px}
-    .file-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
     input[type=file]{font-size:14px}
-    button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer}
-    button:hover{background:#245a92}
+    input[type=text],input[type=url],input[type=search],select{
+      font-size:14px;padding:8px 11px;border:1px solid var(--line-strong);border-radius:9px;
+      background:#fff;color:var(--ink);font-family:inherit}
+    input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
+    button{background:var(--accent);color:#fff;border:0;border-radius:9px;padding:9px 16px;
+           font-size:14px;font-family:inherit;cursor:pointer;transition:.12s}
+    button:hover{background:var(--accent-ink)}
+    button:active{transform:translateY(1px)}
+    button[type=button],button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line-strong)}
+    button[type=button]:hover,button.ghost:hover{background:#f5f7fc;border-color:var(--muted)}
+    button.primary{background:var(--accent);color:#fff;border:0}
+    button.primary:hover{background:var(--accent-ink)}
+    button.danger{background:#fff;color:var(--low);border:1px solid var(--low-line)}
+    button.danger:hover{background:var(--low-bg)}
+    button[disabled]{opacity:.55;cursor:default;transform:none}
     .back{font-size:13px}
-    .dim{display:grid;grid-template-columns:160px 1fr 46px;gap:12px;align-items:center;margin:8px 0;font-size:13px}
-    .summary{white-space:pre-line;font-size:14px;line-height:1.6;background:#fbfcfe;border:1px solid var(--line);border-radius:10px;padding:14px}
+    .summary{font-size:14px;line-height:1.55;background:#fbfcff;border:1px solid var(--line);border-radius:10px;padding:14px}
+    .summary .ident{font-weight:700;font-size:15px}
+    .summary .facts{font-weight:600;font-size:14px;color:#3a4a63}
+    .summary .applied{color:var(--muted);font-size:13px;margin:2px 0 4px}
+    .summary .sect{padding-top:10px;margin-top:10px;border-top:1px solid #edf0f7}
+    .summary .sect h4{margin:0 0 4px;color:var(--muted);font-weight:600;font-size:11.5px;
+                      text-transform:uppercase;letter-spacing:.05em}
+    .summary .sect ul{margin:0;padding-left:18px}
+    .summary .sect li{margin:3px 0}
+    .summary .sect li b{color:var(--muted);font-weight:600}
+    .summary .s-verify h4{color:var(--mid)}
+    .summary .s-verify li{color:#7a663c}
     .pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+
+    /* Toasts: an action that saved shouldn't cost a page reload to confirm. */
+    #toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:99}
+    .toast{background:#141b26;color:#fff;font-size:13.5px;padding:11px 15px;border-radius:10px;
+           box-shadow:0 8px 24px rgba(20,27,38,.22);opacity:0;transform:translateY(8px);
+           transition:.18s;max-width:420px}
+    .toast.in{opacity:1;transform:none}
+    .toast.bad{background:var(--low)}
+    .toast.good{background:var(--high)}
+
+    /* Filter bars, shared by the applicant list and the professor queues. */
+    .filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}
+    .filters input[type=search]{flex:1;min-width:200px}
+    .filters .seg{display:flex;border:1px solid var(--line-strong);border-radius:9px;overflow:hidden}
+    .filters .seg button{background:#fff;color:var(--muted);border:0;border-radius:0;font-size:13px;
+                         padding:8px 13px}
+    .filters .seg button.on{background:var(--accent-bg);color:var(--accent-ink);font-weight:600}
+    .empty-note{display:none;color:var(--muted);font-size:13px;padding:6px 2px}
   </style>
 </head>
 <body>
   <header>
-    <h1>Grad App — Applicant Summaries</h1>
-    <div class="sub">Local &amp; deterministic · CSV/Excel + application packets → one record per student · no scoring, no LLM</div>
+    <div class="hrow">
+      <div>
+        <h1>Grad App — Applicant Summaries</h1>
+        <div class="sub">Local &amp; deterministic · CSV/Excel + application packets → one record per student · no scoring, no LLM</div>
+      </div>
+      {% if user %}
+      <div class="who">
+        <span>{{ user.username }} · {{ user.role }}</span>
+        <form action="{{ url_for('logout') }}" method="post" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button type="submit">Sign out</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
   </header>
   <div class="wrap">
+    {% if not logins_on and request.endpoint not in ('setup', 'login') %}
+    <div class="flash" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <span>No logins yet — anyone who can reach this page sees applicant names, scores
+        and essays.</span>
+      <a href="{{ url_for('setup') }}"><button type="button" class="primary"
+         style="font-size:13px;padding:7px 14px">Set up logins</button></a>
+    </div>
+    {% endif %}
     {% with messages = get_flashed_messages() %}
       {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
     {% endwith %}
     {% block body %}{% endblock %}
   </div>
+
+  <div id="toasts" aria-live="polite"></div>
+  <script>
+  // Shared helpers. Every one of these degrades to a plain form post if the
+  // script never runs, so the app still works with JS off.
+  window.toast = function(msg, kind){
+    const el = document.createElement('div');
+    el.className = 'toast' + (kind ? ' ' + kind : '');
+    el.textContent = msg;
+    document.getElementById('toasts').appendChild(el);
+    requestAnimationFrame(() => el.classList.add('in'));
+    setTimeout(() => { el.classList.remove('in');
+                       setTimeout(() => el.remove(), 250); }, kind === 'bad' ? 6000 : 3200);
+  };
+
+  // Submit a <form> in place and report the outcome, instead of reloading.
+  window.postForm = function(form, onOk){
+    const body = new URLSearchParams(new FormData(form));
+    return fetch(form.action, {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded', 'X-Requested-With':'fetch'},
+      body: body
+    }).then(r => r.ok ? r.json().catch(() => ({})) : Promise.reject(r))
+      .then(data => { if (onOk) onOk(data);
+                      window.toast((data && data.message) || 'Saved', 'good'); return data; })
+      .catch(() => window.toast('That didn’t save — reload and try again', 'bad'));
+  };
+
+  // Client-side list filtering: rows carry data-search / data-status.
+  window.wireFilters = function(rootSel, itemSel){
+    const root = document.querySelector(rootSel);
+    if (!root) return;
+    const box = root.querySelector('input[type=search]');
+    const segs = root.querySelectorAll('.seg button');
+    const items = Array.from(document.querySelectorAll(itemSel));
+    const note = document.querySelector('.empty-note');
+    let status = 'all', sort = null;
+    function apply(){
+      const q = (box ? box.value : '').trim().toLowerCase();
+      let shown = 0;
+      items.forEach(el => {
+        const hay = (el.dataset.search || '').toLowerCase();
+        const ok = (!q || hay.includes(q)) &&
+                   (status === 'all' || (el.dataset.status || '') === status);
+        el.style.display = ok ? '' : 'none';
+        if (ok) shown++;
+      });
+      if (note) { note.style.display = shown ? 'none' : 'block'; }
+    }
+    if (box) box.addEventListener('input', apply);
+    segs.forEach(b => b.addEventListener('click', () => {
+      if (b.dataset.status !== undefined){
+        segs.forEach(x => { if (x.dataset.status !== undefined) x.classList.remove('on'); });
+        b.classList.add('on'); status = b.dataset.status; apply();
+      } else if (b.dataset.sort !== undefined){
+        segs.forEach(x => { if (x.dataset.sort !== undefined) x.classList.remove('on'); });
+        b.classList.add('on'); sort = b.dataset.sort;
+        const parent = items[0] && items[0].parentNode;
+        if (parent){
+          items.slice().sort((a, z) => {
+            const av = a.dataset[sort] || '', zv = z.dataset[sort] || '';
+            const an = parseFloat(av), zn = parseFloat(zv);
+            if (!isNaN(an) && !isNaN(zn)) return zn - an;      // numbers: high first
+            return av.localeCompare(zv);
+          }).forEach(el => parent.appendChild(el));
+        }
+      }
+    }));
+    apply();
+  };
+  </script>
 </body>
 </html>

@@ -27,9 +27,16 @@ from .models import parse_record
 from .template import render
 from .merge import (application_section, identity_from, merge_identity,
                     summary_view, upsert_source)
+from .review import STATUS_FIELD, status_from_row
+from .triage import decided
 from .store import Store, db_path_for
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Warnings that `normalize.build_record` decides afresh from the spreadsheet on
+# every run. They are dropped before a re-ingest so a fixed config (or a fixed
+# export) actually clears them, instead of leaving a stale flag on the record.
+_REDERIVED_WARNINGS = ("GPA scale was auto-detected",)
 
 
 def _load_yaml(path: str) -> dict:
@@ -80,11 +87,26 @@ def run(input_csv: str, outdir: str, field_map_path: str) -> Dict[str, Any]:
             continue
 
         sid = rec["cas_id"]
+        # The reviewer's accept/reject/tbd call, if this upload is the marked-up
+        # review sheet coming back. Only a recognised value is written, so
+        # re-uploading the original roster (no status column) can't silently
+        # erase a review that's already been done.
+        status = status_from_row(row)
 
-        def _apply(unified, rec=rec, i=i):
+        def _apply(unified, rec=rec, i=i, status=status):
             merge_identity(unified["identity"], identity_from(rec))
+            # Warnings normally accumulate, which is right for packet findings
+            # (OCR, page splits) — but the ones re-derived from the spreadsheet
+            # on every parse have to be cleared first, or setting gpa.gpa_scale
+            # in the config leaves the "scale was auto-detected" flag on screen
+            # forever after.
+            fresh = rec.get("meta", {}).get("warnings", [])
+            unified["warnings"] = [w for w in unified.get("warnings", [])
+                                   if not w.startswith(_REDERIVED_WARNINGS)]
             upsert_source(unified, "application", application_section(rec),
-                          file=src, row=i, warnings=rec.get("meta", {}).get("warnings", []))
+                          file=src, row=i, warnings=fresh)
+            if status:
+                unified[STATUS_FIELD] = status
             unified["summary"] = render(summary_view(unified))
             return unified
 
@@ -99,7 +121,36 @@ def run(input_csv: str, outdir: str, field_map_path: str) -> Dict[str, Any]:
             "outdir": outdir}
 
 
-def reindex(outdir: str, changed: Optional[Iterable[str]] = None) -> List[dict]:
+def summaries_markdown(index: Iterable[dict]) -> str:
+    """The report: one card per applicant you have actually decided on.
+
+    Swiped only — shortlisted or rejected. The point of a summary is to record a
+    read that happened; an applicant still sitting in the deck hasn't been read
+    yet, and dumping every extracted card into the export was how the file grew
+    to hundreds of pages nobody opened.
+    """
+    entries = list(index)
+    shown = decided(entries)
+    if shown:
+        kept = sum(1 for e in shown if e.get("triage") == "shortlist")
+        blurb = (f"_{len(shown)} of {len(entries)} applicants reviewed — "
+                 f"{kept} shortlisted, {len(shown) - kept} rejected. "
+                 "Descriptive only, no scoring._")
+    else:
+        blurb = ("_Nothing reviewed yet. Summaries appear here once you swipe an "
+                 "applicant in triage._")
+    md = ["# Applicant summaries", "", blurb, ""]
+    for e in shown:
+        outcome = "shortlisted" if e.get("triage") == "shortlist" else "rejected"
+        md.append(f"## {e['name']}  ·  {e['cas_id']}  —  {outcome}")
+        md.append("")
+        md.append(e["summary_text"])
+        md.append("")
+    return "\n".join(md)
+
+
+def reindex(outdir: str, changed: Optional[Iterable[str]] = None, *,
+            reconcile: bool = True, write_report: bool = True) -> List[dict]:
     """Reconcile duplicates and rebuild reports/_summaries.md from the store.
     Called after any source (CSV or document) is ingested.
 
@@ -109,7 +160,11 @@ def reindex(outdir: str, changed: Optional[Iterable[str]] = None) -> List[dict]:
     students). Pass None (e.g. after a code/template change) to refresh all.
     """
     store = Store(db_path_for(outdir))
-    store.reconcile()                                 # collapse same-person duplicates
+    if reconcile:
+        # Reads every record to find same-person duplicates — right after a
+        # batch, wasteful after attaching one document to a student who already
+        # exists. Called per document it made a 400-file ingest quadratic.
+        store.reconcile()
 
     # Re-render summaries from the current template — for the changed students
     # only (or everyone when doing a full refresh).
@@ -144,18 +199,13 @@ def reindex(outdir: str, changed: Optional[Iterable[str]] = None) -> List[dict]:
         store.update(sid, _refresh, create=False)
 
     index = store.index()
-
-    md = ["# Applicant summaries", "",
-          f"_{len(index)} students (descriptive only, no scoring)._", ""]
-    for e in index:
-        md.append(f"## {e['name']}  ·  {e['cas_id']}")
-        md.append("")
-        md.append(e["summary_text"])
-        md.append("")
-    report_path = os.path.join(outdir, "reports", "_summaries.md")
-    os.makedirs(os.path.dirname(report_path), exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(md))
+    if write_report:
+        # The download regenerates this anyway; rewriting the whole report on
+        # every single-document ingest was the other half of the quadratic.
+        report_path = os.path.join(outdir, "reports", "_summaries.md")
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(summaries_markdown(index))
     return index
 
 

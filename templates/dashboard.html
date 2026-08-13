@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Grad App{% endblock %}
+{% block body %}
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+    <div>
+      <h3 style="margin:0">Dashboard</h3>
+      <p class="muted" style="margin:2px 0 0">Who is waiting on whom, and what each
+         professor said. The status report is the same thing as a spreadsheet —
+         one row per applicant, every verdict on it.</p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <a href="{{ url_for('step_upload') }}"><button type="button" class="primary">Start the flow →</button></a>
+      <a href="{{ url_for('download_status') }}"><button type="button">⬇ Status report (.xlsx)</button></a>
+      <a href="{{ url_for('applicants') }}"><button type="button">All applicants</button></a>
+      <a href="{{ url_for('summaries') }}"><button type="button">Summaries</button></a>
+      {% if logins_on %}<a href="{{ url_for('accounts') }}"><button type="button">Accounts</button></a>{% endif %}
+    </div>
+  </div>
+
+  <div class="stats">
+    <a class="stat" href="{{ url_for('applicants') }}">
+      <b>{{ total }}</b><span>on file</span></a>
+    <a class="stat" href="{{ url_for('triage') }}">
+      <b>{{ tbd }}</b><span>waiting in triage</span></a>
+    <a class="stat" href="{{ url_for('summaries') }}">
+      <b>{{ reviewed }}</b><span>you reviewed</span></a>
+    <a class="stat" href="{{ url_for('triage_shortlist') }}">
+      <b>{{ shortlist }}</b><span>shortlisted</span></a>
+    <div class="stat"><b>{{ answered }}</b><span>answered by a professor</span></div>
+  </div>
+</div>
+
+{% if unassigned %}
+<div class="card">
+  <h3 style="margin-top:0">Not assigned yet <span class="chip w">{{ unassigned|length }}</span></h3>
+  <p class="muted">Shortlisted but in nobody's queue — they're waiting on you, not on a
+     professor. <a href="{{ url_for('triage_shortlist') }}">Assign them</a>.</p>
+  <div class="chips">
+    {% for a in unassigned %}
+    <a href="{{ url_for('student', cas_id=a.cas_id) }}" class="chip">{{ a.name }}</a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% for p in professors %}
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
+    <h3 style="margin:0">
+      {% if p.url %}<a href="{{ p.url }}" target="_blank" rel="noopener">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %}
+    </h3>
+    <div class="chips" style="margin:0">
+      {% if p.waiting %}<span class="chip d-tbd">{{ p.waiting|length }} to review</span>{% endif %}
+      {% if p.accepted %}<span class="chip s">{{ p.accepted|length }} accepted</span>{% endif %}
+      {% if p.rejected %}<span class="chip w">{{ p.rejected|length }} rejected</span>{% endif %}
+      {% if not p.assigned %}<span class="chip">nobody assigned</span>{% endif %}
+    </div>
+  </div>
+
+  {% if p.assigned %}
+  <table style="margin-top:10px">
+    <thead><tr><th>Student</th><th>GPA</th><th>Areas</th><th>Their call</th><th>When</th></tr></thead>
+    <tbody>
+      {% for a in p.assigned %}
+      {% set m = a.metrics or {} %}
+      <tr>
+        <td><a href="{{ url_for('student', cas_id=a.cas_id) }}">{{ a.name }}</a>
+            <span class="muted">· {{ a.cas_id }}</span></td>
+        <td>{{ m.get('gpa_value') or '—' }}</td>
+        <td class="muted">{{ (m.get('areas') or [])|join(', ') or '—' }}</td>
+        <td>
+          {% if a.professor_status == 'accept' %}<span class="chip s">accepted</span>
+          {% elif a.professor_status == 'reject' %}<span class="chip w">rejected</span>
+          {% else %}<span class="chip d-tbd">waiting</span>{% endif %}
+        </td>
+        <td class="muted">{{ (a.professor_decided_at or '—')[:10] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted" style="margin:8px 0 0">Nothing in this queue yet —
+     shortlist someone in <a href="{{ url_for('triage') }}">triage</a> and send them here.</p>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if not professors %}
+<div class="card"><p class="muted">No professors configured.
+  <a href="{{ url_for('professors_view', edit=1) }}">Add some</a>.</p></div>
+{% endif %}
+
+<style>
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:14px}
+  .stat{display:block;background:#f6f8fd;border-radius:10px;padding:12px 14px;text-decoration:none;color:inherit}
+  a.stat:hover{background:var(--accent-bg);text-decoration:none}
+  .stat b{display:block;font-size:22px;line-height:1.1}
+  .stat span{font-size:12px;color:var(--muted)}
+</style>
+{% endblock %}

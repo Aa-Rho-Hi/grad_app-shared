@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% from "_wizard.html" import stepper, dropzones %}
+{% block title %}Step 3 — Upload with status{% endblock %}
+{% block body %}
+
+{{ stepper(3) }}
+
+<div class="card">
+  <h3 style="margin-top:0">Step 3 — Upload the marked-up spreadsheet</h3>
+  <p class="muted">The file you just filled in. It merges on <code>cas_id</code>, so nobody is
+     duplicated. Add the packets again if you have more of them — otherwise leave that box empty,
+     the ones already read are still on file.</p>
+
+  {{ dropzones(url_for('step_status_post'),
+               'Spreadsheet with the status column',
+               'The file from step 2, saved with accept / reject / tbd',
+               'Upload and continue →', csv_required=true) }}
+</div>
+
+{% if marked %}
+<div class="card">
+  <div class="chips" style="margin:0">
+    <span class="chip s">{{ marked }} marked</span>
+    {% if tbd %}<span class="chip">{{ tbd }} tbd — these get a card</span>{% endif %}
+  </div>
+  <div style="display:flex;gap:8px;margin-top:14px">
+    <a href="{{ url_for('triage') }}"><button type="button" class="primary">Next → triage</button></a>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

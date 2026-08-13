@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Grad App{% endblock %}
+{% block body %}
+
+<div class="card" style="max-width:420px;margin:6vh auto">
+  <h3 style="margin-top:0">Sign in</h3>
+  <p class="muted">Advisors get the whole flow. Professors get the students assigned
+     to them.</p>
+  <form method="post" style="display:flex;flex-direction:column;gap:10px;margin-top:14px">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
+    <label>
+      <span class="muted" style="display:block;margin-bottom:4px">Username</span>
+      <input type="text" name="username" autocomplete="username" autofocus required
+             style="width:100%">
+    </label>
+    <label>
+      <span class="muted" style="display:block;margin-bottom:4px">Password</span>
+      <input type="password" name="password" autocomplete="current-password" required
+             style="width:100%;font-size:14px;padding:8px 11px;border:1px solid var(--line-strong);
+                    border-radius:9px;font-family:inherit">
+    </label>
+    <button type="submit" class="primary" style="margin-top:4px">Sign in</button>
+  </form>
+
+  <div style="display:flex;align-items:center;gap:10px;margin:16px 0 0">
+    <span style="flex:1;height:1px;background:var(--line)"></span>
+    <span class="muted" style="font-size:12px">or</span>
+    <span style="flex:1;height:1px;background:var(--line)"></span>
+  </div>
+  <a href="{{ url_for('signup') }}" class="btn"
+     style="display:block;text-align:center;margin-top:12px">Create account</a>
+  <p class="muted" style="margin:8px 0 0;font-size:12px;text-align:center">
+    An advisor approves new accounts before they work.
+  </p>
+
+  <p class="muted" style="margin:14px 0 0;font-size:12px">
+    Accounts live in <code>config/users.yaml</code> — manage them with
+    <code>python -m src.users</code>. Delete them all and the app goes back to
+    running without a login.
+  </p>
+</div>
+{% endblock %}

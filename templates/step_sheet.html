@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% from "_wizard.html" import stepper %}
+{% block title %}Step 2 — Add the degree column{% endblock %}
+{% block body %}
+
+{{ stepper(2) }}
+
+<div class="card">
+  <h3 style="margin-top:0">Step 2 — Download the spreadsheet</h3>
+  <p class="muted">Your own spreadsheet, every column intact, with two added right after the names:
+     <code>undergrad_degree</code> read out of each packet, and a blank <code>status</code> column
+     with an accept / reject / tbd dropdown. Your original file isn't touched.</p>
+
+  {% if count %}
+  <div class="chips">
+    <span class="chip">{{ count }} row(s)</span>
+    <span class="chip">{{ coverage.with_degree }} of {{ coverage.total }} degrees filled in</span>
+    {% if coverage.no_packet %}<span class="chip w">{{ coverage.no_packet }} with no packet</span>{% endif %}
+    {% if coverage.packet_no_degree %}<span class="chip w">{{ coverage.packet_no_degree }} packet names no degree</span>{% endif %}
+  </div>
+
+  <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
+    <a href="{{ url_for('review_sheet') }}"><button type="button" class="primary">⬇ Download spreadsheet</button></a>
+    <a href="{{ url_for('step_status') }}"><button type="button">Next →</button></a>
+  </div>
+  <p class="muted" style="margin:12px 0 0">Open it in Excel, put <b>accept</b>, <b>reject</b> or
+     <b>tbd</b> in the <code>status</code> column for every row, and save. Then click Next.</p>
+  {% else %}
+  <p class="muted">No applicants on file yet — <a href="{{ url_for('step_upload') }}">go back to step 1</a>
+     and upload the spreadsheet and packets first.</p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -159,8 +159,8 @@ def test_document_analysis_extracts_review_profile():
 
 
 def test_summary_surfaces_detailed_application_materials():
-    """The descriptive summary surfaces résumé, SOP and recommendation detail for
-    decision-making."""
+    """The scannable card still surfaces résumé, SOP and recommendation evidence
+    for decision-making — clipped, under a heading, one item per line."""
     from src.documents import build_section
     resume = build_section("resume", (
         "Education\nMichigan State University\nBachelor of Science in Electrical Engineering\n"
@@ -187,11 +187,24 @@ def test_summary_surfaces_detailed_application_materials():
         "meta": {"warnings": []},
     }
     text = render(rec)
-    assert "Resume detail" in text and "Graduated with Honor GPA: 3.81" in text
-    assert "SOP detail" in text and "Texas A&M University" in text
-    assert "Recommendation detail" in text and "Dr. Jane Smith" in text
+    assert "### Experience" in text and "power electronics model" in text
+    assert "### In their words (SOP)" in text and "Texas A&M University" in text
+    assert "### Letters" in text and "Dr. Jane Smith" in text
+    assert "### On file" in text
     low = text.lower()
     assert "fit score" not in low and "/100" not in low and "strong candidate" not in low
+    # Bounded, not terse: the card carries whole claims now (the clip budgets
+    # were raised once bullets stopped being cut mid-sentence), but it is still
+    # a scan aid rather than a transcript.
+    assert len(text.split()) < 400, "summary card drifted back into essay length"
+    # Readability contract: every section is a heading plus one item per line,
+    # so nothing is a semicolon-joined paragraph a reviewer has to unpack.
+    for line in text.splitlines():
+        assert len(line) < 420, f"line too long to scan: {line[:80]}…"
+    for block in text.split("\n\n")[1:]:
+        head, *items = block.splitlines()
+        assert head.startswith("### "), f"section without a heading: {head[:60]}"
+        assert items and all(i.startswith("- ") for i in items), f"unbulleted: {head}"
 
 
 def test_reindex_refreshes_existing_summaries(tmp_path):
@@ -213,7 +226,7 @@ def test_reindex_refreshes_existing_summaries(tmp_path):
     reindex(str(tmp_path))
     refreshed = Store(db_path_for(str(tmp_path))).get("CAS-REFRESH")
     assert "OLD SUMMARY" not in refreshed["summary"]
-    assert "Resume detail" in refreshed["summary"]
+    assert "### Experience" in refreshed["summary"]
     assert render(summary_view(refreshed)) == refreshed["summary"]
 
 
@@ -246,7 +259,7 @@ def test_document_ingest_merges_sop(tmp_path):
     assert unified["sources"]["application"] is not None      # CSV section kept
     assert unified["sources"]["sop"]["word_count"] == words    # SOP section added
     low = unified["summary"].lower()
-    assert "sop" in low and "motivation" in low                # SOP surfaced in description
+    assert "in their words (sop)" in low and "- goal:" in low  # SOP surfaced in the card
     # provenance records both sources
     assert {p["source"] for p in unified["provenance"]} == {"application", "sop"}
 
@@ -776,11 +789,1112 @@ def test_web_upload_browse_download_reset(tmp_path, monkeypatch):
     assert Store(db_path_for(str(tmp_path))).count() == 0
 
 
+def test_the_four_steps_walk_in_order(tmp_path, monkeypatch):
+    """Step 1 upload -> step 2 sheet -> step 3 marked-up sheet -> step 4 deck.
+
+    The thing this guards: no summary card is shown before the status pass.
+    """
+    import io
+    import openpyxl
+    from src.review import STATUS_COLUMN
+    from src.store import Store, db_path_for
+    appmod, client = _client(tmp_path, monkeypatch)
+
+    # --- step 1: upload only. No cards. ('/' is the dashboard now.) ---
+    first = client.get("/step/1").get_data(as_text=True)
+    assert "Step 1" in first and 'class="summary"' not in first
+    with open(CSV, "rb") as f:
+        r = client.post("/process", data={"csv": (io.BytesIO(f.read()), "roster.csv")},
+                        content_type="multipart/form-data")
+    assert r.headers["Location"].endswith("/step/2")      # straight on to the sheet
+    store = Store(db_path_for(str(tmp_path)))
+    assert store.count() == 4
+    assert 'class="summary"' not in client.get("/step/1").get_data(as_text=True)
+
+    # --- step 2: the sheet, still no cards ---
+    two = client.get("/step/2")
+    assert two.status_code == 200 and 'class="summary"' not in two.get_data(as_text=True)
+    sheet = client.get("/review-sheet")
+    assert sheet.status_code == 200
+
+    # --- step 3: mark it up and send it back ---
+    assert client.get("/step/3").status_code == 200
+    wb = openpyxl.load_workbook(io.BytesIO(sheet.data))
+    ws = wb["Applicants"]
+    col = [c.value for c in ws[1]].index(STATUS_COLUMN) + 1
+    for row in range(2, ws.max_row + 1):
+        ws.cell(row=row, column=col).value = "tbd" if row < 4 else "accept"
+    buf = io.BytesIO()
+    wb.save(buf)
+    r = client.post("/step/3", data={"csv": (io.BytesIO(buf.getvalue()), "roster_review.xlsx")},
+                    content_type="multipart/form-data")
+    assert r.headers["Location"].endswith("/triage")      # step 4, automatically
+
+    # --- step 4: only the tbd ones are in the deck ---
+    deck_page = client.get("/triage").get_data(as_text=True)
+    assert deck_page.count('class="tcard"') == 2
+    index = Store(db_path_for(str(tmp_path))).index()
+    assert sum(1 for e in index if e["review_status"] == "tbd") == 2
+    assert sum(1 for e in index if e["review_status"] == "accept") == 2
+
+    # the browse view still exists, off the flow
+    assert client.get("/applicants").status_code == 200
+
+
+def test_upload_by_fetch_reports_progress_then_finishes(tmp_path, monkeypatch):
+    """The browser posts by fetch and polls; a plain form post still works."""
+    import io
+    import time
+    appmod, client = _client(tmp_path, monkeypatch)
+    with open(CSV, "rb") as f:
+        r = client.post("/process", data={"csv": (io.BytesIO(f.read()), "roster.csv")},
+                        content_type="multipart/form-data",
+                        headers={"X-Requested-With": "fetch"})
+    assert r.status_code == 200
+    job_id = r.get_json()["job"]
+
+    for _ in range(200):                      # the fixture is small; ~instant
+        status = client.get(f"/jobs/{job_id}").get_json()
+        if status["done"]:
+            break
+        time.sleep(0.05)
+    assert status["done"] and not status["error"]
+    assert status["percent"] == 100
+    assert "summarized" in (status["message"] or "")
+    assert status["next"].endswith("/step/2")
+
+    from src.store import Store, db_path_for
+    assert Store(db_path_for(str(tmp_path))).count() == 4
+    assert client.get("/jobs/nope").status_code == 404
+
+
+def test_actions_answer_fetch_without_a_reload(tmp_path, monkeypatch):
+    """Assign, professor edits and clear-all return JSON to a fetch caller and
+    keep redirecting for a plain form post."""
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    from src.store import Store, db_path_for
+    store = Store(db_path_for(str(tmp_path)))
+    cas = store.index()[0]["cas_id"]
+    store.update(cas, lambda u: {**u, "review_status": "tbd"})
+    client.post("/triage/swipe", data={"cas_id": cas, "direction": "shortlist"})
+
+    fetch = {"X-Requested-With": "fetch"}
+    r = client.post("/triage/assign", data={"cas_id": cas, "professor": "gratz-paul"},
+                    headers=fetch)
+    assert r.status_code == 200 and r.get_json()["name"] == "Paul Gratz"
+
+    # a plain post still redirects, so the page works with JS off
+    assert client.post("/triage/assign",
+                       data={"cas_id": cas, "professor": ""}).status_code == 302
+
+    r = client.post("/reset", headers=fetch)
+    assert r.status_code == 200 and r.get_json()["cleared"] == 4
+
+
+def test_step_three_needs_a_spreadsheet(tmp_path, monkeypatch):
+    appmod, client = _client(tmp_path, monkeypatch)
+    r = client.post("/step/3", data={}, content_type="multipart/form-data",
+                    follow_redirects=True)
+    assert r.status_code == 200 and b"status column filled in" in r.data
+
+
+def test_web_process_accepts_loose_packet_pdfs(tmp_path, monkeypatch):
+    """The packets drop zone takes the PDFs themselves, not only a ZIP."""
+    import io
+    import pytest
+    pytest.importorskip("reportlab")
+    appmod, client = _client(tmp_path, monkeypatch)
+    pdf = tmp_path / "1000419138_Joonha_Jun_Full Application_1_Fall 2020 EE.pdf"
+    _make_packet(str(pdf), "Joonha Jun",
+                 "My goal is to research power systems at Texas A&M University. " * 6,
+                 "Education: State University. Bachelor of Science in Electrical Engineering.")
+    r = client.post("/process", data={
+        "zip": [(io.BytesIO(pdf.read_bytes()), pdf.name)],
+    }, content_type="multipart/form-data", follow_redirects=True)
+    assert r.status_code == 200
+    from src.store import Store, db_path_for
+    assert Store(db_path_for(str(tmp_path))).get("1000419138")["sources"]["sop"]
+
+
+def test_web_process_rejects_other_packet_types(tmp_path, monkeypatch):
+    import io
+    appmod, client = _client(tmp_path, monkeypatch)
+    r = client.post("/process", data={
+        "zip": [(io.BytesIO(b"not a packet"), "notes.txt")],
+    }, content_type="multipart/form-data", follow_redirects=True)
+    assert r.status_code == 200
+    assert b".zip or .pdf" in r.data
+
+
 def test_web_upload_rejects_empty(tmp_path, monkeypatch):
     appmod, client = _client(tmp_path, monkeypatch)
     r = client.post("/upload", data={}, content_type="multipart/form-data",
                     follow_redirects=True)
     assert r.status_code == 200          # flashes an error, doesn't crash
+
+
+# ---------------------------------------------------------- the review pass --
+
+def _packet_record(resume_text="", scores_text="", status=None):
+    from src.documents import build_section
+    from src.merge import new_student, upsert_source
+    u = new_student("CAS-REVIEW")
+    if resume_text:
+        upsert_source(u, "resume", build_section("resume", resume_text, "r.txt"), file="r.txt")
+    if scores_text:
+        upsert_source(u, "scores", build_section("scores", scores_text, "s.txt"), file="s.txt")
+    if status:
+        u["review_status"] = status
+    return u
+
+
+def test_same_name_under_two_ids_is_flagged_not_merged():
+    """The roster and a packet filename can spell a name differently and carry
+    different ids; the store then holds the same person twice."""
+    from src.merge import _norm_name, likely_duplicate_groups
+    assert _norm_name("CHEN-NI LIU") == _norm_name("Chen Ni Liu")   # was not equal
+    groups = likely_duplicate_groups([
+        {"cas_id": "1000419138", "name": "CHEN-NI LIU"},
+        {"cas_id": "8929276570", "name": "Chen Ni Liu"},
+        {"cas_id": "3", "name": "Someone Else"},
+    ])
+    assert [[m["cas_id"] for m in g] for g in groups] == [["1000419138", "8929276570"]]
+    # One record per id is not a duplicate, however many sources it has.
+    assert likely_duplicate_groups([{"cas_id": "1", "name": "A B"},
+                                    {"cas_id": "1", "name": "A B"}]) == []
+
+
+def test_gpa_shows_the_number_the_sheet_holds():
+    """The export's own figure, not a conversion. A /4.0 denominator only
+    appears when the sheet stated the scale — printing "3.8/4.0" for a value
+    that might be out of 5 asserts something the data doesn't support."""
+    warn = ("GPA scale was auto-detected from the value (e.g. 3.8 is read as "
+            "/4.0 even if the transcript uses /5.0) — verify.")
+    rec = {"cas_id": "G1", "personal": {"full_name": "Gpa Person"},
+           "education": [{"college_name": "X",
+                          "gpa": {"raw": 3.8, "scale": 4.0, "normalized_4": 3.8}}],
+           "_documents": {"resume": None, "sop": None, "scores": None, "lors": []},
+           "meta": {"warnings": [warn]}}
+    text = render(rec)
+    assert "GPA 3.8 (scale not stated in the sheet)" in text
+    assert "3.8/4.0" not in text
+
+    rec["meta"]["warnings"] = []                 # scale configured, not guessed
+    assert "GPA 3.8/4.0" in render(rec)
+
+    # A 10-point GPA keeps its own denominator and shows the conversion too.
+    rec["education"][0]["gpa"] = {"raw": 9.14, "scale": 10.0, "normalized_4": 3.66}
+    assert "GPA 9.14/10 (≈3.66/4.0)" in render(rec)
+
+
+def test_fixing_the_gpa_scale_clears_the_stale_warning(tmp_path):
+    """Warnings accumulate, which is right for packet findings — but a flag the
+    spreadsheet parse re-derives every run must not outlive its cause."""
+    import copy
+    import yaml as _yaml
+    from src.store import Store, db_path_for
+    roster = tmp_path / "g.csv"
+    roster.write_text("cas_id,first_name,last_name,college_name_0,gpas_by_transcript_gpa_0\n"
+                      "1000000001,Ten,Point,B Univ,9.14\n", encoding="utf-8")
+    field_map = os.path.join(ROOT, "config", "csv_field_map.yaml")
+
+    run(str(roster), str(tmp_path), field_map)
+    rec = Store(db_path_for(str(tmp_path))).get("1000000001")
+    assert any("auto-detected" in w for w in rec["warnings"])
+    assert "scale not stated" in rec["summary"]
+
+    forced = tmp_path / "forced.yaml"
+    cfg = copy.deepcopy(_yaml.safe_load(open(field_map, encoding="utf-8")))
+    cfg["gpa"]["gpa_scale"] = 10.0
+    forced.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+
+    run(str(roster), str(tmp_path), str(forced))
+    rec = Store(db_path_for(str(tmp_path))).get("1000000001")
+    assert not any("auto-detected" in w for w in rec["warnings"])
+    assert "GPA 9.14/10 (≈3.66/4.0)" in rec["summary"]
+
+
+def test_metrics_carry_the_sheets_figure_and_whether_it_was_assumed():
+    from src.merge import applicant_metrics, new_student
+    u = new_student("G2")
+    u["sources"]["application"] = {"education": [
+        {"college_name": "X", "gpa": {"raw": 3.8, "scale": 4.0, "normalized_4": 3.8}}]}
+    m = applicant_metrics(u)
+    assert m["gpa_value"] == "3.8" and m["gpa_assumed"] is False and m["gpa4"] == 3.8
+
+    u["warnings"] = ["GPA scale was auto-detected from the value — verify."]
+    assert applicant_metrics(u)["gpa_assumed"] is True
+
+
+def test_skills_are_not_printed_twice():
+    """The résumé's own 'Skills:' line lands in technical preparation, and the
+    detected-skills line already says it — printing both put the same list on
+    screen twice."""
+    from src.documents import build_section
+    rec = {
+        "cas_id": "CAS-SKILL",
+        "personal": {"full_name": "Dup Skills"},
+        "_documents": {"resume": build_section("resume", (
+            "Education\nState University\nBachelor of Science in Electrical Engineering\n"
+            "Skills: Python, Matlab, C++, SPICE\n"
+            "Software: OSLO, Lighttools, Code V\n"
+            "Research Experience\nSimulated converter controls in Matlab.\n"
+        ), "r.txt"), "sop": None, "scores": None, "lors": []},
+        "meta": {"warnings": []},
+    }
+    background = render(rec).split("### Experience")[0]
+    assert background.lower().count("skills:") == 1, background
+    assert "Software: OSLO" in background          # the additive line survives
+
+
+def test_undergrad_degree_comes_from_the_packet_only():
+    from src.review import undergrad_degree
+    resume = ("Education\nMichigan State University\n"
+              "Bachelor of Science in Electrical Engineering\nGPA: 3.81\n")
+    assert undergrad_degree(_packet_record(resume)) == \
+        "Bachelor of Science in Electrical Engineering"
+    # No packet -> empty, never inferred from the roster's other columns.
+    assert undergrad_degree(_packet_record()) == ""
+
+
+def test_undergrad_degree_prefers_a_line_that_names_the_field():
+    from src.review import undergrad_degree
+    # The résumé states the credential but not the subject; the transcript does
+    # both, so the transcript wins even though the résumé is checked first.
+    got = undergrad_degree(_packet_record(
+        resume_text="Education\nIndian School of Mines\nBachelor of Eng.\n",
+        scores_text="of this Institute. He/She passed 4-years B.Tech (Electrical Engineering) - with\n"))
+    assert got == "B.Tech (Electrical Engineering)"
+
+
+def test_undergrad_degree_ignores_graduate_only_lines():
+    from src.review import undergrad_degree
+    assert undergrad_degree(_packet_record(
+        resume_text="Education\nMaster of Science in Robotics\nPh.D. in Controls\n")) == ""
+
+
+def test_undergrad_degree_ignores_transcript_boilerplate():
+    """Found by the adversarial pass: a transcript legend line put
+    'Undergraduate degree credit' in somebody's degree column."""
+    from src.review import undergrad_degree
+    for junk in ("NDC = Not for Undergraduate degree credit",
+                 "AGC = Approved for Graduate Credit; CBE = Credit by Exam",
+                 "This certificate is not a degree"):
+        assert undergrad_degree(_packet_record(scores_text=junk)) == "", junk
+
+
+def test_status_accepts_the_past_tense():
+    """Also from the adversarial pass: 'rejected' read as undecided, so a row
+    the reviewer had marked silently stayed in the pool."""
+    from src.review import normalize_status
+    assert normalize_status("rejected") == "reject"
+    assert normalize_status("accepted") == "accept"
+    assert normalize_status("admitted") == "accept"
+
+
+def test_status_column_is_read_back_case_and_synonym_insensitively():
+    from src.review import normalize_status, status_from_row
+    assert status_from_row({"cas_id": "1", "status": "TBD"}) == "tbd"
+    assert status_from_row({"cas_id": "1", "Status": " Accept "}) == "accept"
+    assert status_from_row({"cas_id": "1", "status": "deny"}) == "reject"
+    assert status_from_row({"cas_id": "1"}) == ""
+    # A column the reviewer added by hand under the old name still reads back.
+    assert status_from_row({"cas_id": "1", "decision": "tbd"}) == "tbd"
+    # An unreadable cell is undecided, not a guess.
+    assert normalize_status("looks good?") == "" and normalize_status("") == ""
+
+
+def test_summaries_are_the_reviewed_set():
+    """The summaries view and the export carry what you decided in the deck —
+    shortlisted first, then rejected. Anything still queued has not been read."""
+    from src.run import summaries_markdown
+    from src.triage import decided
+    entries = [
+        {"cas_id": "1", "name": "Zoe", "review_status": "tbd", "summary_text": "z"},
+        {"cas_id": "2", "name": "Adam", "review_status": "tbd", "triage": "reject",
+         "summary_text": "a"},
+        {"cas_id": "3", "name": "Mia", "review_status": "tbd", "triage": "shortlist",
+         "summary_text": "m"},
+    ]
+    assert [e["cas_id"] for e in decided(entries)] == ["3", "2"]   # kept, then cut
+
+    md = summaries_markdown(entries)
+    assert "2 of 3 applicants reviewed — 1 shortlisted, 1 rejected" in md
+    assert "## Mia  ·  3  —  shortlisted" in md
+    assert "## Adam  ·  2  —  rejected" in md
+    assert "Zoe" not in md                       # never swiped, never summarized
+
+    assert "Nothing reviewed yet" in summaries_markdown([entries[0]])
+
+
+def test_review_sheet_round_trip(tmp_path):
+    """Roster in -> degree + blank status out -> marked up -> summaries narrow."""
+    import openpyxl
+    from src.review import write_review_sheet, STATUS_COLUMN, DEGREE_COLUMN
+    from src.store import Store, db_path_for
+
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    raw = os.path.join(str(tmp_path), "raw")
+    os.makedirs(raw, exist_ok=True)
+    import shutil
+    shutil.copy(CSV, os.path.join(raw, os.path.basename(CSV)))
+
+    store = Store(db_path_for(str(tmp_path)))
+    out = write_review_sheet(store.index(), raw, os.path.join(str(tmp_path), "review.xlsx"))
+    wb = openpyxl.load_workbook(out)
+    ws = wb["Applicants"]
+    header = [c.value for c in ws[1]]
+    assert STATUS_COLUMN in header and DEGREE_COLUMN in header
+    assert "How to review" in wb.sheetnames          # legend, not a fake sample row
+    assert ws.max_row == store.count() + 1
+    dv = ws.data_validations.dataValidation
+    assert dv and "accept,reject,tbd" in dv[0].formula1
+
+    # The reviewer marks one row tbd and the rest rejected, then re-uploads.
+    col = header.index(STATUS_COLUMN) + 1
+    for r in range(2, ws.max_row + 1):
+        ws.cell(row=r, column=col).value = "tbd" if r == 2 else "reject"
+    marked = os.path.join(raw, "reviewed.xlsx")
+    wb.save(marked)
+    run(marked, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+
+    index = Store(db_path_for(str(tmp_path))).index()
+    assert sorted(e["review_status"] for e in index) == ["reject"] * (len(index) - 1) + ["tbd"]
+    # The report is the record of what was *reviewed*, and nothing has been
+    # swiped yet — marking a spreadsheet row tbd only queues it for the deck.
+    report = open(os.path.join(str(tmp_path), "reports", "_summaries.md"),
+                  encoding="utf-8").read()
+    assert "Nothing reviewed yet" in report and report.count("\n## ") == 0
+
+
+def test_loose_pdfs_in_a_folder_ingest_like_a_zip(tmp_path):
+    """A folder of packets and a ZIP of the same packets take one code path."""
+    import pytest
+    pytest.importorskip("reportlab")
+    from src.ingest_zip import ingest_packet_folder
+    from src.store import Store, db_path_for
+    folder = tmp_path / "packets"
+    folder.mkdir()
+    _make_packet(str(folder / "1000419138_Joonha_Jun_Full Application_1_Fall 2020 EE.pdf"),
+                 "Joonha Jun",
+                 "My research is in power systems and smart grid renewable energy. " * 10,
+                 "Education\nState University\nBachelor of Science in Electrical Engineering\n")
+    report = ingest_packet_folder(str(folder), str(tmp_path))
+    assert report["pdfs_found"] == 1 and report["students_updated"] == 1
+    u = Store(db_path_for(str(tmp_path))).get("1000419138")
+    assert u["sources"]["sop"] and u["sources"]["resume"]
+
+
+def test_enrich_folder_writes_the_sheet_next_to_the_roster(tmp_path):
+    """The whole of step 1: spreadsheet + packets in a folder -> review sheet
+    beside the original, degree filled in from the packet."""
+    import pytest
+    pytest.importorskip("reportlab")
+    import openpyxl
+    from src.enrich import enrich_folder, find_roster
+    from src.review import STATUS_COLUMN, DEGREE_COLUMN
+
+    folder = tmp_path / "Fall 2027 applicants"
+    folder.mkdir()
+    # Two applicants; only the first has a packet, so the other's degree cell
+    # stays blank and shows up in the coverage counts.
+    cas, other = "1000419138", "1000555201"
+    (folder / "roster.csv").write_text(
+        "cas_id,first_name,last_name,college_name_0,gpas_by_transcript_gpa_0\n"
+        f"{cas},Joonha,Jun,State University,3.7\n"
+        f"{other},Maria,Lopez,Other University,3.4\n", encoding="utf-8")
+    # `_make_packet` draws each section as a single PDF text run, so keep the
+    # résumé to one line — embedded newlines come back glued ("...—iBachelor")
+    # and that's the fixture's rendering, not what a real packet looks like.
+    _make_packet(str(folder / f"{cas}_Joonha_Jun_Full Application_1_Fall 2027 EE.pdf"),
+                 "Joonha Jun",
+                 "My goal is to research power systems at Texas A&M University. " * 6,
+                 "Education: State University. Bachelor of Science in Electrical "
+                 "Engineering. Skills: python, matlab.")
+
+    assert find_roster(str(folder)).endswith("roster.csv")
+    result = enrich_folder(str(folder), str(tmp_path / "store"))
+
+    out = result["review_sheet"]
+    assert out == str(folder / "roster_review.xlsx") and os.path.exists(out)
+    assert os.path.exists(folder / "roster.csv"), "the original roster is never modified"
+
+    ws = openpyxl.load_workbook(out)["Applicants"]
+    header = [c.value for c in ws[1]]
+    assert STATUS_COLUMN in header and DEGREE_COLUMN in header
+    degrees = {ws.cell(row=r, column=header.index("cas_id") + 1).value:
+               ws.cell(row=r, column=header.index(DEGREE_COLUMN) + 1).value
+               for r in range(2, ws.max_row + 1)}
+    assert degrees[cas] == "Bachelor of Science in Electrical Engineering"
+
+    # Everyone else had no packet, so their cell is blank — and that's reported
+    # as missing data rather than passed off as "no degree".
+    cov = result["coverage"]
+    assert cov["with_degree"] == 1 and cov["no_packet"] == cov["total"] - 1
+    assert "no packet on file" in "\n".join(__import__("src.enrich", fromlist=["describe"])
+                                            .describe(result))
+
+    # Re-running picks the roster, not the review sheet it just wrote.
+    assert find_roster(str(folder)).endswith("roster.csv")
+
+
+# ------------------------------------------------- the swipe pass + queues --
+
+def test_deck_card_is_a_trim_of_the_full_summary():
+    """The deck card is a trim, not a re-render — one place decides what a
+    summary says, this only decides how much of it leads."""
+    from src.triage import condense_card
+    full = render({
+        "cas_id": "CAS-CARD",
+        "personal": {"full_name": "Deck Applicant", "email": "d@x.com"},
+        "_documents": {"resume": None, "sop": None, "scores": None, "lors": []},
+        "meta": {"warnings": ["check this", "and this", "and this too"]},
+    })
+    card = condense_card(full)
+    assert card.splitlines()[0].startswith("Deck Applicant")   # header survives
+    assert "### Verify" in card                    # flags matter to the decision
+    assert "### On file" not in card               # the header chips say this already
+    assert len(card.splitlines()) <= len(full.splitlines())
+
+
+def test_deck_card_still_caps_a_runaway_section():
+    """Loose, not unbounded: a résumé with thirty experience bullets shouldn't
+    push everything else off the first screen."""
+    from src.triage import condense_card
+    text = ("Name · a@b.com\nGPA 4.0/4.0\n\n"
+            "### Experience\n" + "\n".join(f"- item {i}" for i in range(30)) + "\n\n"
+            "### On file\n- resume 100w")
+    card = condense_card(text)
+    assert card.count("- item") == 5          # Experience capped
+    assert "### On file" not in card          # not a deciding section
+
+
+def test_swipes_are_separate_from_the_spreadsheet_status():
+    from src.triage import apply_swipe
+    right = apply_swipe({"review_status": "tbd"}, "shortlist")
+    assert right["triage"] == "shortlist" and right["review_status"] == "tbd"
+
+    left = apply_swipe({"review_status": "tbd"}, "reject")
+    assert left["triage"] == "reject" and left["review_status"] == "reject"
+
+    back = apply_swipe(dict(left, assigned_to="gratz-paul"), "undo")
+    assert "triage" not in back and back["review_status"] == "tbd"
+    assert "assigned_to" not in back           # undo clears the assignment too
+
+    import pytest
+    with pytest.raises(ValueError):
+        apply_swipe({}, "sideways")
+
+
+def test_deck_holds_tbd_applicants_who_have_not_been_swiped():
+    from src.triage import deck, shortlisted
+    entries = [
+        {"cas_id": "1", "review_status": "tbd"},
+        {"cas_id": "2", "review_status": "tbd", "triage": "shortlist"},
+        {"cas_id": "3", "review_status": "accept"},
+        {"cas_id": "4", "review_status": "reject", "triage": "reject"},
+    ]
+    assert [e["cas_id"] for e in deck(entries)] == ["1"]
+    assert [e["cas_id"] for e in shortlisted(entries)] == ["2"]
+
+
+def test_professors_load_and_queue_up():
+    from src.triage import load_professors, professor_by_id, queues
+    profs = load_professors()
+    names = [p["name"] for p in profs]
+    assert "Paul Gratz" in names and len(profs) >= 4
+    assert all(p["url"].startswith("https://") for p in profs if p["url"])
+    assert professor_by_id("gratz-paul", profs)["name"] == "Paul Gratz"
+    assert professor_by_id("nobody", profs) is None
+
+    entries = [{"cas_id": "1", "triage": "shortlist", "assigned_to": "gratz-paul"},
+               {"cas_id": "2", "triage": "shortlist"},                # unassigned
+               {"cas_id": "3", "triage": "reject"}]
+    filled, unassigned = queues(entries, profs)
+    assert [len(p["applicants"]) for p in filled if p["id"] == "gratz-paul"] == [1]
+    assert [e["cas_id"] for e in unassigned] == ["2"]
+
+
+# ------------------------------------------------ accounts, roles, handoff --
+
+def _with_accounts(tmp_path, monkeypatch, password="pw"):
+    """Point the app at a throwaway users.yaml and create both roles."""
+    from src import users as usersmod
+    path = usersmod.USERS_YAML          # conftest points this at tmp_path
+    people = usersmod.add_user([], "maya", password, usersmod.ADVISOR)
+    people = usersmod.add_user(people, "pgratz", password, usersmod.PROFESSOR,
+                               "gratz-paul")
+    usersmod.save_users(people, path)
+    return path
+
+
+def test_login_is_off_until_an_account_exists(tmp_path, monkeypatch):
+    """A single reviewer shouldn't have to authenticate to themselves — but a
+    half-configured login that lets everyone in would be worse than none."""
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    assert not usersmod.load_users()                   # conftest: no accounts
+    assert client.get("/").status_code == 200          # -> app is open
+
+    _with_accounts(tmp_path, monkeypatch)
+    r = client.get("/")
+    assert r.status_code == 302 and "/login" in r.headers["Location"]
+    assert client.get("/login").status_code == 200
+
+
+def test_first_account_is_created_from_the_browser(tmp_path, monkeypatch):
+    """Turning logins on shouldn't need the CLI — and the setup page must close
+    itself afterwards, or anyone reaching the app could mint an advisor."""
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    path = usersmod.USERS_YAML
+
+    # the banner points at it while the app is wide open
+    assert b"Set up logins" in client.get("/").data
+    assert client.get("/setup").status_code == 200
+
+    assert b"match" in client.post("/setup", data={
+        "username": "maya", "password": "longenough", "confirm": "different"},
+        follow_redirects=True).data
+    assert b"4 characters" in client.post("/setup", data={
+        "username": "maya", "password": "ab", "confirm": "ab"},
+        follow_redirects=True).data
+    assert usersmod.load_users(path) == []          # nothing written on a bad try
+
+    r = client.post("/setup", data={"username": "maya", "password": "longenough",
+                                    "confirm": "longenough"})
+    assert r.headers["Location"].endswith("/accounts")
+    people = usersmod.load_users(path)
+    assert [u["username"] for u in people] == ["maya"] and people[0]["role"] == "advisor"
+    assert people[0]["password_hash"] and "longenough" not in people[0]["password_hash"]
+    assert client.get("/").status_code == 200       # already signed in
+
+    # closed now: a second visit can't mint another advisor
+    r = client.get("/setup")
+    assert r.status_code == 302 and "/login" in r.headers["Location"]
+
+    # the advisor adds a professor login from the UI
+    client.post("/accounts/add", data={"username": "pgratz", "password": "longenough",
+                                       "role": "professor", "professor": "gratz-paul"},
+                follow_redirects=True)
+    assert {u["username"] for u in usersmod.load_users(path)} == {"maya", "pgratz"}
+    # and can't lock themselves out
+    r = client.post("/accounts/remove", data={"username": "maya"}, follow_redirects=True)
+    assert b"signed in with" in r.data
+    assert len(usersmod.load_users(path)) == 2
+
+
+def test_roles_see_different_apps(tmp_path, monkeypatch):
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+
+    # wrong password gets nowhere
+    r = client.post("/login", data={"username": "maya", "password": "nope"},
+                    follow_redirects=True)
+    assert b"don&#39;t match" in r.data or b"don't match" in r.data
+
+    client.post("/login", data={"username": "maya", "password": "pw"})
+    assert client.get("/").status_code == 200                 # advisor dashboard
+    assert client.get("/step/1").status_code == 200
+    assert client.get("/triage").status_code == 200
+    client.get("/logout")
+
+    client.post("/login", data={"username": "pgratz", "password": "pw"})
+    r = client.get("/")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/prof")
+    assert client.get("/prof").status_code == 200
+    # the advisor's flow is closed to them, loudly rather than silently
+    for advisor_only in ("/step/1", "/triage", "/applicants", "/professors"):
+        assert client.get(advisor_only).status_code == 403, advisor_only
+
+
+def test_signup_creates_a_request_not_an_account(tmp_path, monkeypatch):
+    """'Create account' must not mean 'grant yourself access'."""
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+
+    r = client.post("/signup", data={"username": "stranger", "password": "pw1234",
+                                     "confirm": "pw1234"})
+    assert r.status_code == 302 and "/login" in r.headers["Location"]
+
+    people = usersmod.load_users()
+    row = next(u for u in people if u["username"] == "stranger")
+    assert row["role"] == usersmod.PENDING and row["professor"] == ""
+    assert row["password_hash"] and "pw1234" not in row["password_hash"]
+
+    # right password, still no way in — and no session is minted
+    r = client.post("/login", data={"username": "stranger", "password": "pw1234"},
+                    follow_redirects=True)
+    assert b"waiting for an advisor" in r.data
+    for gated in ("/step/1", "/applicants", "/prof", "/accounts"):
+        assert client.get(gated).status_code in (302, 403), gated
+
+
+def test_pending_signup_cannot_lock_everyone_out(tmp_path, monkeypatch):
+    """The trap: an app in no-login mode has no advisor account. If a stranger's
+    request counted as 'an account exists', it would flip login on and nobody —
+    including the advisor — could get in."""
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    assert client.get("/").status_code == 200          # open, no accounts
+
+    # signup is closed in this state; it hands you to /setup instead
+    r = client.post("/signup", data={"username": "x", "password": "pw1234",
+                                     "confirm": "pw1234"})
+    assert r.status_code == 302 and "/setup" in r.headers["Location"]
+
+    # and even a request written directly doesn't flip the switch
+    usersmod.save_users(usersmod.request_account([], "sneaky", "pw1234"))
+    assert not usersmod.login_required_globally()
+    assert client.get("/").status_code == 200
+    assert client.get("/setup").status_code == 200     # advisor can still set up
+
+
+def test_advisor_approves_and_assigns_the_role(tmp_path, monkeypatch):
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+    client.post("/signup", data={"username": "newprof", "password": "pw1234",
+                                 "confirm": "pw1234"})
+
+    # a professor can't approve anyone — that's how you'd escalate
+    client.post("/login", data={"username": "pgratz", "password": "pw"})
+    assert client.post("/accounts/approve",
+                       data={"username": "newprof", "role": "advisor"}).status_code == 403
+    assert usersmod.load_users()[-1]["role"] == usersmod.PENDING
+    client.get("/logout")
+
+    client.post("/login", data={"username": "maya", "password": "pw"})
+    page = client.get("/accounts").get_data(as_text=True)
+    assert "Waiting for approval" in page and "newprof" in page
+
+    client.post("/accounts/approve", data={"username": "newprof", "role": "professor",
+                                           "professor": "duffield-nick"})
+    row = next(u for u in usersmod.load_users() if u["username"] == "newprof")
+    assert row["role"] == "professor" and row["professor"] == "duffield-nick"
+
+    client.get("/logout")
+    client.post("/login", data={"username": "newprof", "password": "pw1234"})
+    assert client.get("/prof").status_code == 200
+    assert client.get("/applicants").status_code == 403       # still not an advisor
+
+
+def test_signup_does_not_leak_who_already_has_an_account(tmp_path, monkeypatch):
+    """A taken-username error on an open form is a staff directory."""
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+    before = len(usersmod.load_users())
+
+    taken = client.post("/signup", data={"username": "maya", "password": "pw1234",
+                                         "confirm": "pw1234"}, follow_redirects=True)
+    fresh = client.post("/signup", data={"username": "nobody", "password": "pw1234",
+                                         "confirm": "pw1234"}, follow_redirects=True)
+    assert b"Request sent" in taken.data and b"Request sent" in fresh.data
+    assert b"already has an account" not in taken.data
+
+    people = usersmod.load_users()
+    assert len(people) == before + 1                    # only the new one landed
+    assert next(u for u in people if u["username"] == "maya")["role"] == "advisor"
+
+
+def test_rejecting_a_request_removes_it(tmp_path, monkeypatch):
+    from src import users as usersmod
+    appmod, client = _client(tmp_path, monkeypatch)
+    _with_accounts(tmp_path, monkeypatch)
+    client.post("/signup", data={"username": "spam", "password": "pw1234",
+                                 "confirm": "pw1234"})
+    client.post("/login", data={"username": "maya", "password": "pw"})
+    client.post("/accounts/remove", data={"username": "spam"})
+    assert not any(u["username"] == "spam" for u in usersmod.load_users())
+
+
+def test_approve_rejects_a_role_the_form_did_not_offer(tmp_path, monkeypatch):
+    from src import users as usersmod
+    users = usersmod.request_account([], "someone", "pw1234")
+    for bad in ("", "pending", "admin", "ADVISOR"):
+        try:
+            usersmod.approve_user(users, "someone", bad)
+            raise AssertionError(f"{bad!r} was accepted as a role")
+        except usersmod.UserError:
+            pass
+    # a professor role with no professor named is equally refused
+    try:
+        usersmod.approve_user(users, "someone", "professor")
+        raise AssertionError("professor with no professor id was accepted")
+    except usersmod.UserError:
+        pass
+
+
+def test_a_professor_only_rules_on_their_own_queue(tmp_path, monkeypatch):
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    from src.store import Store, db_path_for
+    store = Store(db_path_for(str(tmp_path)))
+    mine, theirs = [e["cas_id"] for e in store.index()][:2]
+    store.update(mine, lambda u: {**u, "triage": "shortlist", "assigned_to": "gratz-paul"})
+    store.update(theirs, lambda u: {**u, "triage": "shortlist", "assigned_to": "fan-zhiwen"})
+
+    _with_accounts(tmp_path, monkeypatch)
+    client.post("/login", data={"username": "pgratz", "password": "pw"})
+
+    page = client.get("/prof").get_data(as_text=True)
+    assert page.count('class="tcard"') == 1            # only their own student
+
+    r = client.post("/prof/decide", data={"cas_id": mine, "decision": "accept"})
+    assert r.status_code == 200 and r.get_json()["professor_status"] == "accept"
+
+    # someone else's student is refused even with the id in hand
+    assert client.post("/prof/decide",
+                       data={"cas_id": theirs, "decision": "accept"}).status_code == 403
+    assert client.post("/prof/decide",
+                       data={"cas_id": mine, "decision": "sideways"}).status_code == 400
+
+    # the professor's call never overwrites the advisor's
+    rec = Store(db_path_for(str(tmp_path))).get(mine)
+    assert rec["professor_status"] == "accept" and rec["triage"] == "shortlist"
+    assert rec["professor_decided_at"]
+
+    client.post("/prof/decide", data={"cas_id": mine, "decision": "undo"})
+    assert "professor_status" not in Store(db_path_for(str(tmp_path))).get(mine)
+
+
+def test_dashboard_shows_each_professors_verdicts(tmp_path, monkeypatch):
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    from src.store import Store, db_path_for
+    store = Store(db_path_for(str(tmp_path)))
+    ids = [e["cas_id"] for e in store.index()]
+    store.update(ids[0], lambda u: {**u, "triage": "shortlist",
+                                    "assigned_to": "gratz-paul",
+                                    "professor_status": "accept"})
+    store.update(ids[1], lambda u: {**u, "triage": "shortlist",
+                                    "assigned_to": "gratz-paul"})
+    store.update(ids[2], lambda u: {**u, "triage": "shortlist"})   # unassigned
+
+    page = client.get("/").get_data(as_text=True)
+    assert "Paul Gratz" in page
+    assert "1 accepted" in page and "1 to review" in page
+    assert "Not assigned yet" in page
+
+
+def test_status_report_carries_every_verdict(tmp_path, monkeypatch):
+    """One row per applicant with all three verdicts and the professor's name —
+    the thing an advisor mails round."""
+    import io
+    import openpyxl
+    from src.status_report import COLUMNS, rows_for, summarize
+    from src.store import Store, db_path_for
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    store = Store(db_path_for(str(tmp_path)))
+    ids = [e["cas_id"] for e in store.index()]
+    store.update(ids[0], lambda u: {**u, "review_status": "tbd", "triage": "shortlist",
+                                    "assigned_to": "gratz-paul",
+                                    "professor_status": "accept",
+                                    "professor_decided_at": "2027-01-05T10:00:00+00:00"})
+    store.update(ids[1], lambda u: {**u, "review_status": "tbd", "triage": "shortlist",
+                                    "assigned_to": "gratz-paul"})
+    store.update(ids[2], lambda u: {**u, "review_status": "reject", "triage": "reject"})
+
+    r = client.get("/download/status.xlsx")
+    assert r.status_code == 200
+    assert "applicant_status" in r.headers["Content-Disposition"]
+
+    wb = openpyxl.load_workbook(io.BytesIO(r.data))
+    ws = wb["Status"]
+    header = [c.value for c in ws[1]]
+    assert header == COLUMNS
+    assert ws.max_row == len(ids) + 1                    # everyone, not just the decided
+    by_id = {row[header.index("cas_id")]: row
+             for row in ws.iter_rows(min_row=2, values_only=True)}
+
+    accepted = by_id[ids[0]]
+    assert accepted[header.index("professor")] == "Paul Gratz"
+    assert accepted[header.index("professor_status")] == "accept"
+    assert accepted[header.index("professor_decided")] == "2027-01-05"
+    assert accepted[header.index("advisor_triage")] == "shortlist"
+
+    # in a queue but not yet ruled on
+    assert by_id[ids[1]][header.index("professor_status")] == "waiting"
+    # nobody's queue: no professor, and not "waiting" on one either.
+    # (An empty cell reads back as None from openpyxl — that's Excel, not us.)
+    rejected = by_id[ids[2]]
+    assert not rejected[header.index("professor")]
+    assert not rejected[header.index("professor_status")]
+    assert rejected[header.index("status")] == "reject"
+
+    board = wb["By professor"]
+    tallies = {row[0]: row[1:] for row in board.iter_rows(min_row=2, values_only=True)}
+    assert tallies["Paul Gratz"] == (2, 1, 0, 1)          # assigned, acc, rej, waiting
+    assert tallies["— not assigned —"][0] == len(ids) - 2
+
+    # the helpers work without openpyxl in the way, and sort by professor
+    rows = rows_for(store.index(), appmod.load_professors())
+    assert rows[0]["professor"] == "Paul Gratz"
+    assert summarize(rows, appmod.load_professors())[-1]["professor"] == "— not assigned —"
+
+
+def _bulk_roster(path, n):
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("cas_id,first_name,last_name,email,college_name_0,"
+                 "gpas_by_transcript_gpa_0\n")
+        for i in range(n):
+            fh.write(f"{1000000000 + i},First{i},Last{i},p{i}@x.edu,"
+                     f"State University,{3 + (i % 90) / 100:.2f}\n")
+    return str(path)
+
+
+def test_lists_are_paginated_not_dumped(tmp_path, monkeypatch):
+    """Every applicant card on one page was 19 MB of HTML at five thousand —
+    fast to serve, unusable to open."""
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(_bulk_roster(tmp_path / "bulk.csv", 120), str(tmp_path),
+        os.path.join(ROOT, "config", "csv_field_map.yaml"))
+
+    page = client.get("/applicants").get_data(as_text=True)
+    assert page.count('class="card applicant"') == appmod.PAGE_SIZE
+    assert "Page 1 of 3" in page
+    assert client.get("/applicants?page=3").get_data(as_text=True).count(
+        'class="card applicant"') == 20
+    # a page number past the end clamps rather than 500s or shows nothing
+    assert 'class="card applicant"' in client.get("/applicants?page=99").get_data(as_text=True)
+    assert client.get("/applicants?page=notanumber").status_code == 200
+
+
+def test_the_deck_streams_in_batches(tmp_path, monkeypatch):
+    """The deck holds a batch; the browser asks for more as it works down."""
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(_bulk_roster(tmp_path / "bulk.csv", 60), str(tmp_path),
+        os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    from src.store import Store, db_path_for
+    store = Store(db_path_for(str(tmp_path)))
+    ids = [e["cas_id"] for e in store.index()]
+    for sid in ids:
+        store.update(sid, lambda u: {**u, "review_status": "tbd"})
+
+    page = client.get("/triage").get_data(as_text=True)
+    assert page.count('class="tcard"') == appmod.DECK_BATCH
+    # the count is the whole pile, not the batch on screen
+    assert ">60</b> to read" in page
+
+    seen = "&".join(f"seen={i}" for i in ids[:appmod.DECK_BATCH])
+    more = client.get(f"/triage/cards?{seen}").get_json()
+    assert more["html"].count('class="tcard"') == appmod.DECK_BATCH
+    assert more["remaining"] == 60 - 2 * appmod.DECK_BATCH
+    # and it never hands back someone already swiped past
+    assert not any(f'data-cas="{i}"' in more["html"] for i in ids[:appmod.DECK_BATCH])
+
+
+def test_page_level_counts_do_not_read_every_record(tmp_path, monkeypatch):
+    """Coverage and the exports run off the cached index. Reading full records
+    (each carrying whole essays) to render a one-line stat is what made the
+    status export take eleven seconds."""
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(_bulk_roster(tmp_path / "bulk.csv", 40), str(tmp_path),
+        os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    from src.store import Store, db_path_for
+    store = Store(db_path_for(str(tmp_path)))
+
+    calls = []
+    real_all = store.__class__.all
+    monkeypatch.setattr(store.__class__, "all",
+                        lambda self: (calls.append(1), real_all(self))[1])
+
+    for url in ("/step/1", "/step/2", "/applicants", "/download/status.xlsx",
+                "/review-sheet", "/"):
+        assert client.get(url).status_code in (200, 302), url
+    assert not calls, f"{len(calls)} full-record scans during ordinary page views"
+
+
+def test_status_report_is_advisor_only(tmp_path, monkeypatch):
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    _with_accounts(tmp_path, monkeypatch)
+    client.post("/login", data={"username": "pgratz", "password": "pw"})
+    assert client.get("/download/status.xlsx").status_code == 403
+
+
+def test_missing_professor_file_does_not_break_the_app(tmp_path):
+    from src.triage import load_professors
+    assert load_professors(str(tmp_path / "nope.yaml")) == []
+
+
+def test_professor_list_edits_round_trip_through_the_file(tmp_path):
+    from src.triage import (add_professor, load_professors, remove_professor,
+                            save_professors, update_professor)
+    path = str(tmp_path / "professors.yaml")
+    profs = add_professor([], "Ada Lovelace", "https://example.edu/ada",
+                          "Computing, Analytical Engines")
+    save_professors(profs, path)
+    loaded = load_professors(path)
+    assert loaded == [{"id": "ada-lovelace", "name": "Ada Lovelace",
+                       "url": "https://example.edu/ada",
+                       "areas": ["Computing", "Analytical Engines"]}]
+
+    # Renaming keeps the id, because assignments point at it.
+    renamed = update_professor(loaded, "ada-lovelace", name="Ada B. Lovelace")
+    save_professors(renamed, path)
+    again = load_professors(path)
+    assert again[0]["id"] == "ada-lovelace" and again[0]["name"] == "Ada B. Lovelace"
+    assert again[0]["areas"] == ["Computing", "Analytical Engines"]   # untouched
+
+    save_professors(remove_professor(again, "ada-lovelace"), path)
+    assert load_professors(path) == []
+
+
+def test_professor_edits_reject_bad_input():
+    import pytest
+    from src.triage import (ProfessorError, add_professor, remove_professor,
+                            update_professor)
+    with pytest.raises(ProfessorError):
+        add_professor([], "   ")                                  # no name
+    # A javascript: URL would execute from the href we render.
+    with pytest.raises(ProfessorError):
+        add_professor([], "X", "javascript:alert(1)")
+    existing = add_professor([], "Paul Gratz")
+    with pytest.raises(ProfessorError):
+        add_professor(existing, "paul gratz")                     # duplicate
+    with pytest.raises(ProfessorError):
+        update_professor(existing, "nobody", name="Y")
+    with pytest.raises(ProfessorError):
+        remove_professor(existing, "nobody")
+    # Two genuinely different people whose names slugify the same still fit.
+    two = add_professor(add_professor([], "Li Wei"), "Li-Wei")
+    assert [p["id"] for p in two] == ["li-wei", "li-wei-2"]
+
+
+def test_deleting_a_professor_frees_their_queue(tmp_path, monkeypatch):
+    from src import triage as triagemod
+    appmod, client = _client(tmp_path, monkeypatch)
+    path = str(tmp_path / "professors.yaml")
+    monkeypatch.setattr(triagemod, "PROFESSORS_YAML", path)
+    triagemod.save_professors(triagemod.add_professor([], "Paul Gratz"), path)
+
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    from src.store import Store, db_path_for
+    store = Store(db_path_for(str(tmp_path)))
+    cas = store.index()[0]["cas_id"]
+    store.update(cas, lambda u: {**u, "review_status": "tbd"})
+    client.post("/triage/swipe", data={"cas_id": cas, "direction": "shortlist"})
+    client.post("/triage/assign", data={"cas_id": cas, "professor": "paul-gratz"})
+    assert store.get(cas)["assigned_to"] == "paul-gratz"
+
+    client.post("/professors/delete", data={"id": "paul-gratz"}, follow_redirects=True)
+    assert triagemod.load_professors(path) == []
+    # The applicant is still shortlisted — just nobody's, rather than pointing
+    # at a professor who no longer exists.
+    assert store.get(cas)["assigned_to"] == ""
+    assert store.get(cas)["triage"] == "shortlist"
+    assert "not assigned yet" in client.get("/professors").get_data(as_text=True).lower()
+
+
+def test_triage_routes_round_trip(tmp_path, monkeypatch):
+    """Swipe right, assign a professor, see them in that professor's queue."""
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    from src.store import Store, db_path_for
+    store = Store(db_path_for(str(tmp_path)))
+    ids = [e["cas_id"] for e in store.index()]
+    for sid in ids:
+        store.update(sid, lambda u: {**u, "review_status": "tbd"})
+
+    assert client.get("/triage").status_code == 200
+    assert client.get("/triage").get_data(as_text=True).count('class="tcard"') == len(ids)
+
+    r = client.post("/triage/swipe", data={"cas_id": ids[0], "direction": "shortlist"})
+    assert r.status_code == 200 and r.get_json()["triage"] == "shortlist"
+    client.post("/triage/swipe", data={"cas_id": ids[1], "direction": "reject"})
+    # a left swipe takes them out of the tbd pool entirely
+    assert client.get("/triage").get_data(as_text=True).count('class="tcard"') == len(ids) - 2
+
+    assert client.post("/triage/swipe",
+                       data={"cas_id": ids[2], "direction": "sideways"}).status_code == 400
+    assert client.post("/triage/swipe",
+                       data={"cas_id": "no-such-id", "direction": "reject"}).status_code == 404
+
+    client.post("/triage/assign", data={"cas_id": ids[0], "professor": "gratz-paul"})
+    queue_page = client.get("/professors").get_data(as_text=True)
+    assert "Paul Gratz" in queue_page and "1 in queue" in queue_page
+    assert client.post("/triage/assign",
+                       data={"cas_id": ids[0], "professor": "ghost"}).status_code == 400
+
+
+def test_the_summaries_view_and_download_follow_the_swipe(tmp_path, monkeypatch):
+    """Swiping changes what belongs in the report but doesn't re-run the
+    pipeline, so the download has to be built fresh rather than served from the
+    file the last ingest left on disk."""
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    from src.store import Store, db_path_for
+    store = Store(db_path_for(str(tmp_path)))
+    ids = [e["cas_id"] for e in store.index()]
+    for sid in ids:
+        store.update(sid, lambda u: {**u, "review_status": "tbd"})
+
+    page = client.get("/summaries").get_data(as_text=True)
+    assert "Nothing reviewed yet" in page and page.count('class="summary"') == 0
+
+    client.post("/triage/swipe", data={"cas_id": ids[0], "direction": "shortlist"})
+    client.post("/triage/swipe", data={"cas_id": ids[1], "direction": "reject"})
+
+    page = client.get("/summaries").get_data(as_text=True)
+    assert page.count('class="summary"') == 2
+    assert "shortlisted" in page and "rejected" in page
+
+    md = client.get("/download/summaries").get_data(as_text=True)
+    assert "2 of 4 applicants reviewed" in md
+    assert md.count("\n## ") == 2                  # the two swiped, nobody else
+
+
+def test_a_right_swipe_can_name_the_professor(tmp_path, monkeypatch):
+    """Picking on the card saves a second pass through the shortlist; the
+    shortlist can still change it afterwards."""
+    appmod, client = _client(tmp_path, monkeypatch)
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    from src.store import Store, db_path_for
+    store = Store(db_path_for(str(tmp_path)))
+    ids = [e["cas_id"] for e in store.index()]
+    for sid in ids:
+        store.update(sid, lambda u: {**u, "review_status": "tbd"})
+
+    # the deck offers the picker
+    assert 'class="prof-pick"' in client.get("/triage").get_data(as_text=True)
+
+    r = client.post("/triage/swipe", data={"cas_id": ids[0], "direction": "shortlist",
+                                           "professor": "gratz-paul"})
+    assert r.get_json()["assigned_to"] == "gratz-paul"
+
+    # blank is fine — they land on the shortlist unassigned (no field written)
+    client.post("/triage/swipe", data={"cas_id": ids[1], "direction": "shortlist",
+                                       "professor": ""})
+    assert store.get(ids[1]).get("assigned_to", "") == ""
+
+    # an invented professor is refused rather than silently stored
+    assert client.post("/triage/swipe", data={"cas_id": ids[2], "direction": "shortlist",
+                                              "professor": "ghost"}).status_code == 400
+    # changing it later, from the shortlist
+    client.post("/triage/assign", data={"cas_id": ids[0], "professor": "fan-zhiwen"})
+    assert store.get(ids[0])["assigned_to"] == "fan-zhiwen"
+    assert 'name="professor"' in client.get("/triage/shortlist").get_data(as_text=True)
+
+
+def test_review_sheet_keeps_every_original_column(tmp_path):
+    import openpyxl
+    from src.review import write_review_sheet
+    from src.store import Store, db_path_for
+    run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
+    raw = os.path.join(str(tmp_path), "raw")
+    os.makedirs(raw, exist_ok=True)
+    import shutil
+    shutil.copy(CSV, os.path.join(raw, os.path.basename(CSV)))
+    original = list(read_rows(CSV)[0].keys())
+    store = Store(db_path_for(str(tmp_path)))
+    out = write_review_sheet(store.index(), raw, os.path.join(str(tmp_path), "review.xlsx"))
+    header = [c.value for c in openpyxl.load_workbook(out)["Applicants"][1]]
+    assert set(original) <= set(header), "the reviewer's own columns must survive"
 
 
 if __name__ == "__main__":

@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% from "_summary.html" import summary_card %}
+{% block title %}{{ professor.name }} — Grad App{% endblock %}
+{% block body %}
+
+<div class="deck-head">
+  <div>
+    <h3 style="margin:0">{{ professor.name }}</h3>
+    <p class="muted" style="margin:2px 0 0">
+      {% if cards %}
+        <b id="left">{{ cards|length + remaining }}</b> student(s) to review.
+        Drag the card, use the buttons, or press <kbd>←</kbd> / <kbd>→</kbd>.
+        <kbd>U</kbd> undoes the last one.
+      {% else %}
+        Nothing waiting on you right now.
+      {% endif %}
+    </p>
+  </div>
+  <div class="chips" style="margin:0">
+    {% if accepted %}<span class="chip s">{{ accepted|length }} accepted</span>{% endif %}
+    {% if rejected %}<span class="chip w">{{ rejected|length }} passed</span>{% endif %}
+  </div>
+</div>
+
+{% if cards %}
+<div id="deck" class="deck">
+  {% for c in cards %}
+  <article class="tcard" data-cas="{{ c.cas_id }}" style="z-index:{{ 100 - loop.index }}">
+    <div class="tcard-head">
+      <div>
+        <h3 style="margin:0"><a href="{{ url_for('student', cas_id=c.cas_id) }}" target="_blank" rel="noopener">{{ c.name }}</a></h3>
+        <span class="muted" style="font-size:12px">{{ c.cas_id }}</span>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        {% for src in c.sources_present %}<span class="chip s">{{ src }}</span>{% endfor %}
+      </div>
+    </div>
+    <div class="tcard-scroll">
+      <div class="tcard-body">{{ summary_card(c.card_text) }}</div>
+      <div class="tcard-fade"></div>
+    </div>
+    <div class="wash yes"></div>
+    <div class="wash no"></div>
+    <div class="stamp yes">Accept</div>
+    <div class="stamp no">Pass</div>
+  </article>
+  {% endfor %}
+</div>
+
+<div class="deck-actions">
+  <button type="button" id="btn-no" class="big no">← Pass</button>
+  <button type="button" id="btn-undo" class="big">↺ Undo</button>
+  <button type="button" id="btn-yes" class="big yes">Accept →</button>
+</div>
+
+<div id="done" class="card" style="display:none">
+  <h3 style="margin-top:0">All done</h3>
+  <p class="muted">You've been through everyone assigned to you. The advisor can see
+     your calls on their dashboard.</p>
+</div>
+{% endif %}
+
+{% if mine %}
+<div class="card" style="margin-top:20px">
+  <h3 style="margin-top:0">Your queue <span class="chip">{{ queue_total }}</span></h3>
+  <table>
+    <thead><tr><th>Student</th><th>GPA</th><th>Areas</th><th>Your call</th></tr></thead>
+    <tbody>
+      {% for a in mine %}
+      {% set m = a.metrics or {} %}
+      <tr>
+        <td><a href="{{ url_for('student', cas_id=a.cas_id) }}">{{ a.name }}</a></td>
+        <td>{{ m.get('gpa_value') or '—' }}</td>
+        <td class="muted">{{ (m.get('areas') or [])|join(', ') or '—' }}</td>
+        <td>
+          {% if a.professor_status == 'accept' %}<span class="chip s">accepted</span>
+          {% elif a.professor_status == 'reject' %}<span class="chip w">passed</span>
+          {% else %}<span class="chip d-tbd">to review</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if pages > 1 %}
+  <div style="display:flex;align-items:center;justify-content:center;gap:14px;margin-top:12px">
+    {% if page > 1 %}<a href="{{ url_for('professor_home', page=page-1) }}"><button type="button">← Previous</button></a>{% endif %}
+    <span class="muted">Page {{ page }} of {{ pages }}</span>
+    {% if page < pages %}<a href="{{ url_for('professor_home', page=page+1) }}"><button type="button">Next →</button></a>{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% else %}
+<div class="card">
+  <p class="muted">No students have been assigned to you yet. The advisor sends them
+     through after their own first pass.</p>
+</div>
+{% endif %}
+
+<style>
+  .deck-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+  kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-bottom-width:2px;
+      border-radius:5px;padding:1px 5px;background:#fbfcff}
+  .deck{position:relative;height:calc(100vh - 320px);min-height:480px;max-height:760px}
+  .tcard{position:absolute;inset:0;display:flex;flex-direction:column;background:#fff;
+         border:1px solid var(--line);border-radius:16px;padding:16px 18px;overflow:hidden;
+         box-shadow:var(--shadow);cursor:grab;user-select:none;
+         transition:transform .34s cubic-bezier(.2,1.25,.4,1), opacity .28s ease}
+  .tcard.drag{transition:none;cursor:grabbing}
+  .tcard.gone{opacity:0}
+  .tcard:nth-last-child(2){transform:scale(.985) translateY(8px)}
+  .tcard:nth-last-child(3){transform:scale(.97) translateY(16px)}
+  .wash{position:absolute;inset:0;opacity:0;pointer-events:none;transition:opacity .1s}
+  .wash.yes{background:linear-gradient(90deg,transparent 30%,var(--high-bg))}
+  .wash.no{background:linear-gradient(270deg,transparent 30%,var(--low-bg))}
+  .tcard-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;
+              padding-bottom:10px;border-bottom:1px solid var(--line)}
+  .tcard-scroll{position:relative;flex:1;min-height:0;margin-top:10px}
+  .tcard-body{height:100%;overflow-y:auto;overscroll-behavior:contain;padding-right:6px;scrollbar-width:thin}
+  .tcard-body::-webkit-scrollbar{width:8px}
+  .tcard-body::-webkit-scrollbar-thumb{background:#d7deeb;border-radius:8px}
+  .tcard-body .summary{background:transparent;border:0;padding:0}
+  .tcard-fade{position:absolute;left:0;right:8px;bottom:0;height:30px;pointer-events:none;
+              background:linear-gradient(transparent,#fff);opacity:0;transition:opacity .15s}
+  .stamp{position:absolute;top:18px;z-index:2;font-size:15px;font-weight:700;letter-spacing:.06em;
+         text-transform:uppercase;padding:5px 12px;border-radius:8px;border:2px solid;opacity:0;
+         background:rgba(255,255,255,.92)}
+  .stamp.yes{right:18px;color:var(--high);border-color:var(--high);transform:rotate(9deg)}
+  .stamp.no{left:18px;color:var(--low);border-color:var(--low);transform:rotate(-9deg)}
+  .deck-actions{display:flex;gap:10px;justify-content:center;margin-top:16px}
+  button.big{font-size:15px;padding:11px 22px;background:#fff;color:var(--ink);border:1px solid var(--line-strong)}
+  button.big:hover{background:#f5f7fc}
+  button.big.no{border-color:var(--low-line);color:var(--low)}
+  button.big.no:hover{background:var(--low-bg)}
+  button.big.yes{border-color:var(--high-line);color:var(--high)}
+  button.big.yes:hover{background:var(--high-bg)}
+</style>
+
+<script>
+(function(){
+  const deck = document.getElementById('deck');
+  if (!deck) return;
+  const token = "{{ csrf_token() }}";
+  const left = document.getElementById('left');
+  const done = document.getElementById('done');
+  const history = [];
+  const cards = () => Array.from(deck.querySelectorAll('.tcard:not(.gone)'));
+  const top = () => cards()[cards().length - 1] || null;
+
+  function post(cas, decision){
+    return fetch("{{ url_for('professor_decide') }}", {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({cas_id: cas, decision: decision, csrf_token: token})
+    });
+  }
+
+  function markOverflow(card){
+    const body = card.querySelector('.tcard-body'), fade = card.querySelector('.tcard-fade');
+    if (!body || !fade) return;
+    fade.style.opacity = (body.scrollHeight - body.scrollTop - body.clientHeight > 4) ? 1 : 0;
+  }
+  deck.querySelectorAll('.tcard').forEach(card => {
+    const body = card.querySelector('.tcard-body');
+    if (body) body.addEventListener('scroll', () => markOverflow(card));
+    markOverflow(card);
+  });
+
+  function refresh(){
+    const n = cards().length;
+    if (left) left.textContent = n;
+    if (!n && done) { done.style.display = 'block'; deck.style.display = 'none';
+                      document.querySelector('.deck-actions').style.display = 'none'; }
+  }
+  function fly(card, dir){
+    const x = dir === 'accept' ? window.innerWidth : -window.innerWidth;
+    card.style.transform = `translate(${x}px, -40px) rotate(${dir === 'accept' ? 18 : -18}deg)`;
+    card.classList.add('gone');
+    setTimeout(refresh, 60);
+  }
+  function decide(dir){
+    const card = top();
+    if (!card) return;
+    const name = (card.querySelector('h3 a') || {}).textContent || 'Student';
+    history.push({cas: card.dataset.cas, el: card});
+    post(card.dataset.cas, dir);
+    fly(card, dir);
+    window.toast((dir === 'accept' ? 'Accepted ' : 'Passed on ') + name.trim()
+                 + ' — press U to undo', dir === 'accept' ? 'good' : '');
+  }
+  function undo(){
+    const last = history.pop();
+    if (!last) { window.toast('Nothing to undo'); return; }
+    post(last.cas, 'undo');
+    last.el.classList.remove('gone');
+    last.el.style.transform = '';
+    if (done) { done.style.display = 'none'; deck.style.display = '';
+                document.querySelector('.deck-actions').style.display = ''; }
+    refresh();
+  }
+
+  let start = null, current = null, axis = null;
+  deck.addEventListener('pointerdown', ev => {
+    const card = top();
+    if (!card || !card.contains(ev.target)) return;
+    if (ev.target.closest('a, select, option, label, button, input')) return;
+    current = card; start = {x: ev.clientX, y: ev.clientY}; axis = null;
+    card.classList.add('drag');
+  });
+  deck.addEventListener('pointermove', ev => {
+    if (!current || !start) return;
+    const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
+    if (!axis){
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+      if (axis === 'x') current.setPointerCapture(ev.pointerId);
+      else { current.classList.remove('drag'); current = null; start = null; return; }
+    }
+    current.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 18}deg)`;
+    const lean = v => Math.max(0, Math.min(1, v / 120));
+    current.querySelector('.stamp.yes').style.opacity = lean(dx);
+    current.querySelector('.stamp.no').style.opacity = lean(-dx);
+    current.querySelector('.wash.yes').style.opacity = lean(dx) * 0.85;
+    current.querySelector('.wash.no').style.opacity = lean(-dx) * 0.85;
+  });
+  function release(ev){
+    if (!current) return;
+    const dx = ev.clientX - start.x, card = current;
+    card.classList.remove('drag');
+    current = null; start = null;
+    card.querySelectorAll('.stamp, .wash').forEach(s => s.style.opacity = 0);
+    if (Math.abs(dx) > 110) {
+      const dir = dx > 0 ? 'accept' : 'reject';
+      const name = (card.querySelector('h3 a') || {}).textContent || 'Student';
+      history.push({cas: card.dataset.cas, el: card});
+      post(card.dataset.cas, dir);
+      fly(card, dir);
+      window.toast((dir === 'accept' ? 'Accepted ' : 'Passed on ') + name.trim(),
+                   dir === 'accept' ? 'good' : '');
+    } else { card.style.transform = ''; }
+  }
+  deck.addEventListener('pointerup', release);
+  deck.addEventListener('pointercancel', release);
+
+  document.getElementById('btn-yes').addEventListener('click', () => decide('accept'));
+  document.getElementById('btn-no').addEventListener('click', () => decide('reject'));
+  document.getElementById('btn-undo').addEventListener('click', undo);
+  document.addEventListener('keydown', ev => {
+    if (ev.target.matches('input, textarea, select')) return;
+    if (ev.key === 'ArrowRight') decide('accept');
+    else if (ev.key === 'ArrowLeft') decide('reject');
+    else if (ev.key === 'u' || ev.key === 'U') undo();
+  });
+  refresh();
+})();
+</script>
+{% endblock %}
