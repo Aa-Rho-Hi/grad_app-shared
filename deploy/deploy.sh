@@ -31,6 +31,17 @@ REGION="${2:-us-central1}"
 #   NAME=grad-app-test ./deploy/deploy.sh my-project
 NAME="${NAME:-grad-app}"
 
+# Checked here because every GCP resource type has its own name rules and the
+# errors are unhelpful and arrive late — a space in NAME surfaces as a rejected
+# bucket name several minutes and one Cloud SQL instance into the run.
+if ! [[ "$NAME" =~ ^[a-z][a-z0-9-]{1,28}[a-z0-9]$ ]]; then
+  printf '\n\033[1;31mNAME=%s is not a usable resource name.\033[0m\n' "$NAME" >&2
+  printf 'Lowercase letters, digits and hyphens only; start with a letter.\n' >&2
+  printf "Spaces aren't allowed anywhere in GCP — try %s\n\n" \
+    "$(echo "$NAME" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-')" >&2
+  exit 1
+fi
+
 SERVICE="$NAME"
 DB_INSTANCE="${NAME}-db"
 DB_NAME=gradapp
