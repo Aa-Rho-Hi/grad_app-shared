@@ -24,16 +24,85 @@ set -euo pipefail
 PROJECT="${1:?usage: deploy.sh PROJECT_ID [REGION]}"
 REGION="${2:-us-central1}"
 
-SERVICE=grad-app
-DB_INSTANCE=grad-app-db
+# Every resource is named from one prefix, so this can live alongside whatever
+# else is in an existing project without colliding — and so a second copy (a
+# staging one, say) is one variable away:
+#
+#   NAME=grad-app-test ./deploy/deploy.sh my-project
+NAME="${NAME:-grad-app}"
+
+SERVICE="$NAME"
+DB_INSTANCE="${NAME}-db"
 DB_NAME=gradapp
 DB_USER=gradapp
-BUCKET="${PROJECT}-grad-app-files"
-SA="grad-app-run"
+BUCKET="${PROJECT}-${NAME}-files"
+SA="${NAME}-run"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+die() { printf '\n\033[1;31m%s\033[0m\n' "$1" >&2; exit 1; }
+
+# --------------------------------------------------------------------------
+# Preflight.
+#
+# This is written to be run against a project you may not own — a shared
+# departmental one, say — where a script that dies halfway through leaves
+# service accounts and a Cloud SQL instance behind for somebody else to find
+# and wonder about. So: check access, check permissions, show what will be
+# created versus reused, and get a yes before touching anything.
+# --------------------------------------------------------------------------
+gcloud projects describe "$PROJECT" >/dev/null 2>&1 || die \
+"Can't see project '$PROJECT' as $(gcloud config get-value account 2>/dev/null).
+
+Projects you can access:
+$(gcloud projects list --format='  value(projectId)' 2>/dev/null || echo '  (none — gcloud auth login?)')
+
+Pass one of those:  ./deploy/deploy.sh PROJECT_ID"
 
 gcloud config set project "$PROJECT" >/dev/null
+
+say "Checking you can do what this needs in $PROJECT"
+NEEDED=(
+  resourcemanager.projects.setIamPolicy
+  iam.serviceAccounts.create
+  cloudsql.instances.create
+  storage.buckets.create
+  secretmanager.secrets.create
+  run.services.create
+  cloudtasks.queues.create
+)
+GRANTED="$(gcloud projects test-iam-permissions "$PROJECT" \
+  --permissions="$(IFS=,; echo "${NEEDED[*]}")" \
+  --format='value(permissions)' 2>/dev/null | tr ';' '\n' | tr ',' '\n')"
+MISSING=()
+for perm in "${NEEDED[@]}"; do
+  grep -qx "$perm" <<<"$GRANTED" || MISSING+=("$perm")
+done
+if [ ${#MISSING[@]} -gt 0 ]; then
+  die "Your account is missing these permissions on '$PROJECT':
+
+$(printf '  %s\n' "${MISSING[@]}")
+
+Ask whoever owns the project for roles/editor plus
+roles/resourcemanager.projectIamAdmin, or for a project of your own.
+Stopping now rather than part-way through."
+fi
+
+# What already exists, so nothing is created by surprise in a shared project.
+say "What this will do in $PROJECT"
+exists() { eval "$1" >/dev/null 2>&1 && echo "reuse " || echo "CREATE"; }
+printf '  %s  Cloud SQL instance  %s\n' \
+  "$(exists "gcloud sql instances describe $DB_INSTANCE")" "$DB_INSTANCE"
+printf '  %s  Storage bucket      %s\n' \
+  "$(exists "gcloud storage buckets describe gs://$BUCKET")" "$BUCKET"
+printf '  %s  Cloud Tasks queue   %s\n' \
+  "$(exists "gcloud tasks queues describe ${NAME}-ingest --location=$REGION")" "${NAME}-ingest"
+printf '  %s  Cloud Run service   %s\n' \
+  "$(exists "gcloud run services describe $SERVICE --region=$REGION")" "$SERVICE"
+printf '\n  Region: %s\n  Ongoing cost: about $10/month, almost all Cloud SQL.\n' "$REGION"
+printf '  Nothing else in this project is touched.\n\n'
+
+read -r -p "Continue? [y/N] " reply
+[[ "$reply" =~ ^[Yy]$ ]] || die "Stopped. Nothing was created."
 
 say "Enabling the APIs this needs"
 gcloud services enable \
@@ -69,11 +138,11 @@ ensure_secret() {   # name, generator
   fi
 }
 
-ensure_secret grad-app-db-password "python3 -c 'import secrets;print(secrets.token_urlsafe(32),end=\"\")'"
-ensure_secret grad-app-secret-key  "python3 -c 'import secrets;print(secrets.token_hex(32),end=\"\")'"
-ensure_secret grad-app-setup-token "python3 -c 'import secrets;print(secrets.token_urlsafe(16),end=\"\")'"
+ensure_secret ${NAME}-db-password "python3 -c 'import secrets;print(secrets.token_urlsafe(32),end=\"\")'"
+ensure_secret ${NAME}-secret-key  "python3 -c 'import secrets;print(secrets.token_hex(32),end=\"\")'"
+ensure_secret ${NAME}-setup-token "python3 -c 'import secrets;print(secrets.token_urlsafe(16),end=\"\")'"
 
-DB_PASSWORD="$(gcloud secrets versions access latest --secret=grad-app-db-password)"
+DB_PASSWORD="$(gcloud secrets versions access latest --secret=${NAME}-db-password)"
 gcloud sql users describe "$DB_USER" --instance="$DB_INSTANCE" >/dev/null 2>&1 \
   && gcloud sql users set-password "$DB_USER" --instance="$DB_INSTANCE" --password="$DB_PASSWORD" \
   || gcloud sql users create "$DB_USER" --instance="$DB_INSTANCE" --password="$DB_PASSWORD"
@@ -85,10 +154,10 @@ gcloud sql users describe "$DB_USER" --instance="$DB_INSTANCE" >/dev/null 2>&1 \
 # holding applicant records.
 CONNECTION="${PROJECT}:${REGION}:${DB_INSTANCE}"
 DSN="postgresql://${DB_USER}:${DB_PASSWORD}@/${DB_NAME}?host=/cloudsql/${CONNECTION}"
-if gcloud secrets describe grad-app-db-url >/dev/null 2>&1; then
-  printf '%s' "$DSN" | gcloud secrets versions add grad-app-db-url --data-file=- >/dev/null
+if gcloud secrets describe ${NAME}-db-url >/dev/null 2>&1; then
+  printf '%s' "$DSN" | gcloud secrets versions add ${NAME}-db-url --data-file=- >/dev/null
 else
-  printf '%s' "$DSN" | gcloud secrets create grad-app-db-url --data-file=- \
+  printf '%s' "$DSN" | gcloud secrets create ${NAME}-db-url --data-file=- \
     --replication-policy=automatic
 fi
 unset DB_PASSWORD DSN
@@ -125,7 +194,7 @@ gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
 # received it, and a deploy or scale-down mid-ingest loses the rest of the
 # batch. Cloud Tasks holds each file until a 2xx comes back.
 # --------------------------------------------------------------------------
-QUEUE_NAME=grad-app-ingest
+QUEUE_NAME="${NAME}-ingest"
 if ! gcloud tasks queues describe "$QUEUE_NAME" --location="$REGION" >/dev/null 2>&1; then
   say "Creating the ingest queue"
   # Concurrency is capped low on purpose: every task is an OCR job competing
@@ -139,7 +208,7 @@ QUEUE_PATH="projects/${PROJECT}/locations/${REGION}/queues/${QUEUE_NAME}"
 
 # Cloud Tasks signs its callback as this account, and /tasks/run verifies it —
 # the endpoint writes to the database and has no session behind it.
-TASKS_SA="grad-app-tasks"
+TASKS_SA="${NAME}-tasks"
 TASKS_EMAIL="${TASKS_SA}@${PROJECT}.iam.gserviceaccount.com"
 gcloud iam service-accounts describe "$TASKS_EMAIL" >/dev/null 2>&1 || \
   gcloud iam service-accounts create "$TASKS_SA" --display-name="Grad app (Cloud Tasks caller)"
@@ -166,7 +235,7 @@ gcloud run deploy "$SERVICE" \
   `# leave GRADAPP_ENV unset and boot the container in local mode -- SQLite, no` \
   `# bucket, and none of the cloud guardrails, with nothing to indicate it.` \
   --set-env-vars "GRADAPP_ENV=cloud,GRADAPP_BUCKET=${BUCKET},GRADAPP_DATA=/tmp/gradapp-data,GRADAPP_USERS_FILE=/tmp/gradapp-data/config/users.yaml,GRADAPP_PROFESSORS_FILE=/tmp/gradapp-data/config/professors.yaml" \
-  --set-secrets "GRADAPP_DATABASE_URL=grad-app-db-url:latest,GRADAPP_SECRET_KEY=grad-app-secret-key:latest,GRADAPP_SETUP_TOKEN=grad-app-setup-token:latest" \
+  --set-secrets "GRADAPP_DATABASE_URL=${NAME}-db-url:latest,GRADAPP_SECRET_KEY=${NAME}-secret-key:latest,GRADAPP_SETUP_TOKEN=${NAME}-setup-token:latest" \
   --memory 2Gi --cpu 2 --timeout 900 \
   --min-instances 0 --max-instances 4 \
   --allow-unauthenticated
@@ -187,7 +256,7 @@ gcloud run services update "$SERVICE" --region "$REGION" \
 gcloud run services add-iam-policy-binding "$SERVICE" --region "$REGION" \
   --member="serviceAccount:$TASKS_EMAIL" --role=roles/run.invoker >/dev/null
 
-TOKEN="$(gcloud secrets versions access latest --secret=grad-app-setup-token)"
+TOKEN="$(gcloud secrets versions access latest --secret=${NAME}-setup-token)"
 
 cat <<EOF
 
