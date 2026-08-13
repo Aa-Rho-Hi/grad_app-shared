@@ -82,6 +82,7 @@ $(gcloud projects list --format='  value(projectId)' 2>/dev/null || echo '  (non
 Pass one of those:  ./deploy/deploy.sh PROJECT_ID"
 
 gcloud config set project "$PROJECT" >/dev/null
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)' 2>/dev/null || true)"
 
 say "Checking you can do what this needs in $PROJECT"
 NEEDED=(
@@ -261,16 +262,47 @@ fi
 # A service account with exactly what the app needs, rather than the default
 # Compute account, which has edit on the whole project.
 # --------------------------------------------------------------------------
-SA_EMAIL="${SA}@${PROJECT}.iam.gserviceaccount.com"
-gcloud iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1 || \
-  gcloud iam service-accounts create "$SA" --display-name="Grad app (Cloud Run)"
+# SERVICE_ACCOUNT lets you point at an account that already holds the roles,
+# for when you can create resources in a project but not grant roles on it.
+SA_EMAIL="${SERVICE_ACCOUNT:-${SA}@${PROJECT}.iam.gserviceaccount.com}"
+if [ -z "${SERVICE_ACCOUNT:-}" ]; then
+  gcloud iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1 || \
+    gcloud iam service-accounts create "$SA" --display-name="Grad app (Cloud Run)"
+fi
 
-for role in roles/cloudsql.client roles/secretmanager.secretAccessor; do
+# Granting a role on the *project* needs resourcemanager.projects.setIamPolicy,
+# which departmental projects rarely hand out — and shouldn't have to, since
+# most of what this app needs can be granted on the individual resources
+# instead. So: try the narrow grant first, fall back to the project, and record
+# anything that neither works for rather than dying on it. What's left is
+# printed at the end as an exact request for whoever does administer the
+# project, which is far more useful than a stack trace.
+NEEDS_ADMIN=()
+
+grant_project() {   # role
   gcloud projects add-iam-policy-binding "$PROJECT" \
-    --member="serviceAccount:$SA_EMAIL" --role="$role" --condition=None >/dev/null
-done
+    --member="serviceAccount:$SA_EMAIL" --role="$1" --condition=None >/dev/null 2>&1 \
+    || NEEDS_ADMIN+=("gcloud projects add-iam-policy-binding $PROJECT \\
+    --member=serviceAccount:$SA_EMAIL \\
+    --role=$1 --condition=None")
+}
+
+# Bucket and secrets take resource-level bindings, and you can set those on
+# things you created — no project-wide rights involved.
 gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" \
-  --member="serviceAccount:$SA_EMAIL" --role=roles/storage.objectAdmin >/dev/null
+  --member="serviceAccount:$SA_EMAIL" --role=roles/storage.objectAdmin >/dev/null 2>&1 \
+  || grant_project roles/storage.objectAdmin
+
+for secret in "${NAME}-db-url" "${NAME}-secret-key" "${NAME}-setup-token"; do
+  gcloud secrets add-iam-policy-binding "$secret" \
+    --member="serviceAccount:$SA_EMAIL" --role=roles/secretmanager.secretAccessor \
+    >/dev/null 2>&1 || NEEDS_ADMIN+=("gcloud secrets add-iam-policy-binding $secret \\
+    --member=serviceAccount:$SA_EMAIL \\
+    --role=roles/secretmanager.secretAccessor")
+done
+
+# Cloud SQL has no per-instance IAM, so this one is project-level or nothing.
+grant_project roles/cloudsql.client
 
 # --------------------------------------------------------------------------
 # The ingest queue. Without this an upload is processed on the instance that
@@ -295,11 +327,49 @@ TASKS_SA="${NAME}-tasks"
 TASKS_EMAIL="${TASKS_SA}@${PROJECT}.iam.gserviceaccount.com"
 gcloud iam service-accounts describe "$TASKS_EMAIL" >/dev/null 2>&1 || \
   gcloud iam service-accounts create "$TASKS_SA" --display-name="Grad app (Cloud Tasks caller)"
-gcloud projects add-iam-policy-binding "$PROJECT" \
-  --member="serviceAccount:$SA_EMAIL" --role=roles/cloudtasks.enqueuer --condition=None >/dev/null
-# The app's own account has to be able to mint tokens as the caller account.
+# Per-queue rather than project-wide where the API allows it.
+gcloud tasks queues add-iam-policy-binding "$QUEUE_NAME" --location="$REGION" \
+  --member="serviceAccount:$SA_EMAIL" --role=roles/cloudtasks.enqueuer >/dev/null 2>&1 \
+  || grant_project roles/cloudtasks.enqueuer
+
+# Binding on the service account itself, so creating it is enough to grant it.
 gcloud iam service-accounts add-iam-policy-binding "$TASKS_EMAIL" \
-  --member="serviceAccount:$SA_EMAIL" --role=roles/iam.serviceAccountTokenCreator >/dev/null
+  --member="serviceAccount:$SA_EMAIL" --role=roles/iam.serviceAccountTokenCreator \
+  >/dev/null 2>&1 || NEEDS_ADMIN+=("gcloud iam service-accounts add-iam-policy-binding $TASKS_EMAIL \\
+    --member=serviceAccount:$SA_EMAIL \\
+    --role=roles/iam.serviceAccountTokenCreator")
+
+# Stop here rather than deploying something that cannot start. Without
+# cloudsql.client the container comes up, fails to reach the database, and
+# crash-loops -- which looks like a bug in the app rather than a missing grant.
+if [ ${#NEEDS_ADMIN[@]} -gt 0 ]; then
+  printf '\n\033[1;31m%s\033[0m\n' "Everything is built except the permissions below."
+  cat <<EOF
+
+Your account can create resources in this project but not grant roles on it
+(resourcemanager.projects.setIamPolicy). These are what the app's service
+account still needs. Send them to whoever administers
+$PROJECT -- they are copy-pasteable as-is:
+
+EOF
+  printf '  %s\n\n' "${NEEDS_ADMIN[@]}"
+  cat <<EOF
+Nothing is wasted: Cloud SQL, the bucket, the secrets, the queue and the
+service accounts all exist. Re-run this script once the grants are in and it
+will carry on from here.
+
+If you would rather not wait, you can deploy using an existing service account
+that already holds these roles -- often the default compute one:
+
+  SERVICE_ACCOUNT=${PROJECT_NUMBER:-PROJECT_NUMBER}-compute@developer.gserviceaccount.com \\
+    ./deploy/deploy.sh $PROJECT
+
+That trades least-privilege for speed: the default account usually has Editor
+on the whole project, so the app would be able to reach far more than it needs.
+Fine for a pilot on synthetic data, worth undoing before real applicants.
+EOF
+  exit 1
+fi
 
 # --------------------------------------------------------------------------
 # Build and deploy.
