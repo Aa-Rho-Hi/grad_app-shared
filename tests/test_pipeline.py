@@ -2117,3 +2117,74 @@ def test_review_sheet_keeps_every_original_column(tmp_path):
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def _make_quick_admit_packet(path: str) -> None:
+    """A CAS 'Quick Admit' packet: a resume and a release statement, no SOP.
+
+    The release-statement page carries the spacing CAS sprinkles through its own
+    headings in the text layer ("RELEA SE S TATEMENT"), which is exactly what
+    defeats the plain string matches in _FORM_TERMS.
+    """
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import LETTER
+    c = canvas.Canvas(path, pagesize=LETTER)
+    # page 1 — resume
+    for i, ln in enumerate(["Prat Applicant",
+                            "prat@example.com  +1 469 555 1234",
+                            "Dallas, TX",
+                            "Education", "Texas A&M University, B.S. Computer Engineering",
+                            "Experience: embedded software engineering intern",
+                            "Projects: RTL microarchitecture, CMOS adder",
+                            "Technical Skills: Verilog, C, Python"]):
+        c.setFont("Helvetica", 12); c.drawString(72, 720 - i * 20, ln)
+    c.showPage()
+    # page 2 — the designations form page that sits between them in a real
+    # packet. It matters: it makes the hop into the release statement an
+    # ignore->sop transition (cheap) rather than resume->sop (expensive).
+    designations = (
+        "DESIGNA TIONS|"
+        "FALL 2027 QUICK ADMIT M.S. COMPUTER ENGINEERING ( ECEN )|"
+        "Organiz ation: Texas A&M Univ ersity      Deliv ery: Onsit e|"
+        "Depar tment: Electr ical and Comput er Engineer ing|"
+        "Progr am Le vel: Mast ers      Submitt ed Dat e: 08-04- 2026|"
+        "Start Term: Fall 2027      Complet ed Dat e: 08-04- 2026|"
+        "Campus: College St ation      Verified Dat e: -"
+    ).split("|")
+    for i, ln in enumerate(designations):
+        c.setFont("Helvetica", 11); c.drawString(60, 720 - i * 16, ln)
+    c.showPage()
+    # page 3 — release statement, first-person boilerplate, garbled heading
+    release = (
+        "RELEA SE S TATEMENT|"
+        "By accepting these t erms, I cer tify, as r equir ed in the applic ation, that I|"
+        "have read, underst and, and agr ee to all policies f ound within the Help Cent er,|"
+        "including the pr ovisions that place r esponsibilit y for monit oring and ensur ing|"
+        "the pr ogress of m y applic ation pr ocess with me. I cer tify that all of the|"
+        "information and st atements I ha ve pro vided as p art of this applic ation pr ocess|"
+        "are current, accur ate, and complet e to the best of m y knowledge. I underst and|"
+        "that withholding inf ormation r equest ed as p art of the applic ation pr ocess ma y|"
+        "be grounds f or denial of admission b y any p articip ating pr ogram. I agr ee that|"
+        "EngineeringC AS ma y release all applic ation inf ormation I ha ve submitt ed to the|"
+        "graduat e progr ams I designat e, and I pr ovide consent f or educ ational r esearch."
+    ).split("|")
+    for i, ln in enumerate(release):
+        c.setFont("Helvetica", 11); c.drawString(60, 720 - i * 16, ln)
+    c.showPage()
+    c.save()
+
+
+def test_release_statement_is_not_mistaken_for_an_sop(tmp_path):
+    """A CAS release statement is first-person boilerplate, not a statement of
+    purpose. On a Quick Admit packet (no SOP at all) it used to become the whole
+    sop section and suppress the missing-SOP flag, so the reviewer saw legal
+    boilerplate presented as the applicant's statement."""
+    import pytest
+    pytest.importorskip("reportlab")
+    from src.packet import segment
+    pdf = tmp_path / "quick_admit.pdf"
+    _make_quick_admit_packet(str(pdf))
+    seg = segment(str(pdf))
+    assert "resume" in seg["sections"]
+    assert "sop" not in seg["sections"], seg["sections"].get("sop", {}).get("text", "")[:200]
+    assert any("statement-of-purpose" in f for f in seg["flags"]), seg["flags"]

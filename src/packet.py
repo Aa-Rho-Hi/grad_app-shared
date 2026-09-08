@@ -173,6 +173,16 @@ _THESIS_TERMS = ("declaration of authorship", "table of contents", "list of figu
                  "thesis titled", "undergraduate thesis", "this thesis",
                  "master's thesis", "doctoral thesis", "dissertation")
 _MATH_CHARS = ("∑", "∫", "≥", "≤", "α", "β", "∈", "θ", "λ", "∀", "√", "∂", "∇")
+# CAS pulls its form headings out of the text layer with spaces sprinkled
+# through them ("RELEA SE S TATEMENT", "By accepting these t erms"), so the
+# plain matches in _FORM_TERMS and section_headers.ignore never fire on those
+# pages. These are matched against a de-spaced copy of the page head instead.
+# Deliberately narrow: de-spacing "academic history" / "supporting information"
+# drops the GRE and GPA-by-transcript pages out of `scores`, and "designations"
+# pulls the evaluator/Likert form pages out of `lor`.
+_CAS_BOILERPLATE = ("releasestatement", "byacceptingtheseterms",
+                    "biographicinformation", "customquestions")
+_DESPACE = re.compile(r"[^a-z0-9]")
 
 
 def _count(low: str, terms) -> int:
@@ -247,6 +257,14 @@ def _page_scores(text: str, headers: Dict[str, List[str]]) -> Dict[str, float]:
     # page) is first-person and would otherwise be mistaken for an SOP.
     sc["ignore"] += min(3.0, 0.8 * _count(low, _FORM_TERMS))
     sc["ignore"] += min(3.2, 1.6 * _count(low, _THESIS_TERMS))
+    # CAS boilerplate whose heading the text layer garbles. Without this a
+    # release statement scores as an SOP on its first-person prose ("I certify",
+    # "I have read"), and on a packet with no real SOP (Quick Admit admissions
+    # carry none) it becomes the whole sop section AND suppresses the
+    # "could not locate a statement-of-purpose section" flag.
+    if any(t in _DESPACE.sub("", "\n".join(lines[:12]).lower())
+           for t in _CAS_BOILERPLATE):
+        sc["ignore"] += 3.0
     if sum(low.count(ch) for ch in _MATH_CHARS) >= 3:
         sc["ignore"] += 1.6
     if re.search(r"\bchapter\s+\d", low) or re.search(r"\bfigure\s+\d+\.\d", low):
