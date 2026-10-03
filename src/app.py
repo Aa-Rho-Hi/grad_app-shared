@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from typing import Any, Dict, List
 
-from flask import (Flask, Response, abort, flash, redirect, render_template,
+from flask import (Flask, Response, abort, flash, g, redirect, render_template,
                    request, send_file, session, url_for)
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -70,7 +70,7 @@ from .groups import (ACCEPT as G_ACCEPT, CALLS as G_CALLS, GroupError,
                      READY_FOR_FINAL, STAGE_LABELS, TO_DISTRIBUTE, UNDO as G_UNDO,
                      WITH_REVIEWER, add_group, apply_final_call, apply_first_call,
                      assign_reviewer, board as group_board, buckets, drop_professor,
-                     group_by_id, in_group, led_by, load_groups, memberships,
+                     group_by_id, in_group, is_leader, led_by, load_groups, memberships,
                      remove_group, reviewers, save_groups, send_to_group, split_evenly,
                      stage as group_stage, suggest_group, update_group)
 from .prescreen_report import FILES as PRESCREEN_FILES, counts as prescreen_counts, \
@@ -80,7 +80,8 @@ from .screening import (ADMIT, REVIEW, SEPARATE_FILES, TRACK_LABELS, courses_sou
 from . import taskq
 from .storage import blobs_for, use_for_config
 from .store import Store, db_path_for
-from .users import (ADVISOR, PENDING, PROFESSOR, UserError, add_user,
+from .users import (ADVISOR, FACULTY_ROLES, LEADER, PENDING, PROFESSOR, ROLE_ACCESS,
+                    ROLE_LABELS, UserError, add_user, set_role,
                     approve_user, authenticate, linked_professors, load_users,
                     login_required_globally, pending_users, remove_user,
                     request_account, save_users)
@@ -413,20 +414,45 @@ def _setup_token_ok() -> bool:
 
 
 def current_user():
-    return session.get("user") if login_required_globally() else None
+    """The signed-in account as it is *now*, not as it was at sign-in.
+
+    The session only remembers who you are; your role is read back from the
+    accounts file on every request. Otherwise a group leader the grad office
+    has just demoted, or a professor whose login was removed, would keep their
+    old access until they happened to sign out. Checked once per request."""
+    if "_current_user" in g:
+        return g._current_user
+    user = None
+    if login_required_globally():
+        held = session.get("user")
+        if held:
+            fresh = next((u for u in load_users() if u["username"] == held.get("username")), None)
+            if not fresh or fresh["role"] == PENDING:
+                session.pop("user", None)          # removed or un-approved: signed out
+            else:
+                user = {"username": fresh["username"], "role": fresh["role"],
+                        "professor": fresh["professor"]}
+                if user != held:
+                    session["user"] = user
+    g._current_user = user
+    return user
 
 
 def _is(role: str) -> bool:
-    """No accounts configured -> one operator who can do everything."""
+    """No accounts configured -> one operator who can do everything. With
+    accounts, no signed-in user is nobody, never everybody."""
     user = current_user()
-    return user["role"] == role if user else True
+    if user:
+        return user["role"] == role
+    return not login_required_globally()
 
 
 @app.context_processor
 def _inject_user():
     return {"user": current_user(),
             "logins_on": login_required_globally(),
-            "is_advisor": _is(ADVISOR), "is_professor": _is(PROFESSOR)}
+            "is_advisor": _is(ADVISOR), "is_professor": _is(PROFESSOR),
+            "is_leader": _is(LEADER), "role_labels": ROLE_LABELS}
 
 
 @app.before_request
@@ -440,22 +466,23 @@ def _require_login():
         if IS_CLOUD:
             return redirect(url_for("setup"))
         return None
-    if not session.get("user"):
+    if not current_user():
         if _wants_json():
             return {"error": "Sign in first."}, 401
         return redirect(url_for("login", next=request.path))
     return None
 
 
-def role_required(role: str):
-    """Gate a route to one role. A professor poking at an advisor URL gets a
-    403, not a redirect — silently bouncing them to their own page would hide
-    the fact that the link they were sent is not for them."""
+def role_required(*roles: str):
+    """Gate a route to one or more roles. A professor poking at a grad office
+    URL gets a 403, not a redirect — silently bouncing them to their own page
+    would hide the fact that the link they were sent is not for them."""
     def decorate(view):
         @functools.wraps(view)
         def wrapped(*a, **kw):
-            if not _is(role):
-                abort(403, description=f"That page is for the {role}.")
+            if not any(_is(r) for r in roles):
+                who = " or ".join(ROLE_LABELS.get(r, r) for r in roles)
+                abort(403, description=f"That page is for the {who}.")
             return view(*a, **kw)
         return wrapped
     return decorate
@@ -476,7 +503,7 @@ def login():
             # Correct password, no role yet. Safe to be specific here precisely
             # because they've already proved who they are — the generic message
             # above is what everyone else gets.
-            flash("Your account is still waiting for an advisor to approve it.")
+            flash("Your account is still waiting for the grad office to approve it.")
             return redirect(url_for("login"))
         session["user"] = {"username": user["username"], "role": user["role"],
                            "professor": user["professor"]}
@@ -573,12 +600,35 @@ def accounts():
     # Only offer professors who can actually be assigned. Listing the taken
     # ones greyed out reads as "pick me and something reasonable happens"; what
     # actually happens is a second person on that professor's queue.
+    groups = load_groups()
+    leads = {p["id"]: [grp["name"] for grp in led_by(p["id"], groups)] for p in faculty}
     return render_template("accounts.html",
                            users=[u for u in people if u["role"] != PENDING],
                            waiting=pending_users(people),
                            faculty=faculty,
+                           names={p["id"]: p["name"] for p in faculty},
                            available=[p for p in faculty if p["id"] not in taken],
-                           taken=taken)
+                           taken=taken, leads=leads, role_access=ROLE_ACCESS,
+                           roles=(ADVISOR, LEADER, PROFESSOR))
+
+
+@app.route("/accounts/role", methods=["POST"])
+@role_required(ADVISOR)
+@limiter.limit("60/hour")
+def accounts_role():
+    """Change what an existing login is, e.g. make a professor a group leader."""
+    username = request.form.get("username", "")
+    role = request.form.get("role", "")
+    me = (current_user() or {}).get("username")
+    if username == me and role != ADVISOR:
+        flash("You can't take the grad office role off the account you're signed in with.")
+        return redirect(url_for("accounts"))
+    try:
+        save_users(set_role(load_users(), username, role, request.form.get("professor", "")))
+        flash(f"{username} is now {ROLE_LABELS.get(role, role)}.")
+    except UserError as exc:
+        flash(str(exc))
+    return redirect(url_for("accounts"))
 
 
 @app.route("/accounts/approve", methods=["POST"])
@@ -671,10 +721,11 @@ def _student_record(cas_id: str) -> Dict[str, Any]:
 
 @app.route("/")
 def index():
-    """Where a login lands. A professor only ever has their own queue, so send
-    them straight to it rather than to a dashboard about other people's work."""
+    """Where a login lands. Professors and group leaders go to their own page
+    (their queue, and the groups they lead) rather than to a dashboard about
+    everyone's work."""
     user = current_user()
-    if user and user["role"] == PROFESSOR:
+    if user and user["role"] in FACULTY_ROLES:
         return redirect(url_for("professor_home"))
     entries = _summaries()
     groups = load_groups()
@@ -706,55 +757,81 @@ def step_upload():
 # ------------------------------------------------------------- professors --
 
 def _my_professor_id() -> str:
-    """Which professor the session is. With no accounts configured there is one
-    operator, so fall back to the id in the URL query for a quick local look."""
+    """Which faculty member the session is. With logins on that comes only
+    from a professor or group leader login: a grad office login is nobody's
+    reviewer, and must not become one by adding ?as= to a URL. With no
+    accounts configured there is one operator, so ?as= picks whose queue to
+    look at."""
     user = current_user()
-    if user and user["role"] == PROFESSOR:
-        return user["professor"]
+    if user:
+        return user["professor"] if user["role"] in FACULTY_ROLES else ""
     return request.args.get("as") or ""
 
 
 def _leads(group: Dict[str, Any]) -> bool:
-    """May the current session act as this group's leader? With no logins
-    there's one operator who does everything; with logins, only the professor
-    named as the group's leader. The grad office can look but not decide: the
-    final call is the leader's."""
+    """May the current session act as one of this group's leaders? It takes a
+    Group leader login *and* being named a leader of this group. The grad
+    office can look but not decide. With no logins there's one operator."""
     user = current_user()
     if not user:
-        return True
-    return user["role"] == PROFESSOR and bool(group.get("leader")) \
-        and user.get("professor") == group["leader"]
+        return not login_required_globally()
+    return user["role"] == LEADER and is_leader(user.get("professor") or "", group)
+
+
+def _acting_leader(group: Dict[str, Any], unified: Dict[str, Any]) -> str:
+    """Which leader is making this call. With logins, whoever is signed in.
+    Without, the single operator stands in for the leader who's also the
+    reviewer if there is one (so "one call counts as both" still works), else
+    the group's first leader."""
+    user = current_user()
+    if user:
+        return user.get("professor") or ""
+    reviewer = unified.get("assigned_to") or ""
+    leaders = group.get("leaders") or []
+    return reviewer if reviewer in leaders else (leaders[0] if leaders else "")
 
 
 def _may_view(unified: Dict[str, Any]) -> bool:
-    """Who can open an applicant's page: the grad office, the reviewer they
-    were assigned to, and the leader of the group they were sent to."""
+    """Who can open an applicant's page: the grad office; the professor or
+    leader they're assigned to for review; and, for a Group leader login, a
+    leader of the group they were sent to."""
     user = current_user()
-    if not user or user["role"] == ADVISOR:
+    if not user:
+        return not login_required_globally()
+    if user["role"] == ADVISOR:
         return True
     me = user.get("professor") or ""
-    if not me:
+    if not me or user["role"] not in FACULTY_ROLES:
         return False
     if unified.get("assigned_to") == me:
         return True
     group = group_by_id(unified.get("group") or "")
-    return bool(group and group.get("leader") == me)
+    return bool(group and user["role"] == LEADER and is_leader(me, group))
 
 
 @app.route("/prof")
 def professor_home():
     """A professor's own deck: the students their group leader handed them,
-    plus a way into any group they lead."""
+    plus, for a Group leader login, a way into the groups they lead."""
+    user = current_user()
+    if user and user["role"] == ADVISOR:
+        # The grad office has nobody's queue; the dashboard is theirs.
+        return redirect(url_for("index"))
     prof_id = _my_professor_id()
     prof = professor_by_id(prof_id)
     if not prof:
         # No account and no ?as= — offer the list rather than a blank page.
         return render_template("prof_pick.html", professors=load_professors())
     entries = _summaries()
-    leading = []
-    for g in led_by(prof_id, load_groups()):
-        b = buckets(in_group(entries, g["id"]))
-        leading.append(dict(g, to_distribute=len(b[TO_DISTRIBUTE]),
+    leading, named_only = [], []
+    for grp in led_by(prof_id, load_groups()):
+        if user and user["role"] != LEADER:
+            # Named a leader on the Groups page, but signed in as a professor:
+            # say so, rather than silently showing nothing.
+            named_only.append(grp)
+            continue
+        b = buckets(in_group(entries, grp["id"]))
+        leading.append(dict(grp, to_distribute=len(b[TO_DISTRIBUTE]),
                             ready=len(b[READY_FOR_FINAL]), out=len(b[WITH_REVIEWER])))
     mine = assigned_to(entries, prof_id)
     waiting = professor_deck(entries, prof_id)
@@ -762,6 +839,7 @@ def professor_home():
              for e in waiting[:DECK_BATCH]]
     shown, page, pages = _page_of(mine, request.args.get("page", 1, type=int))
     return render_template("prof_deck.html", professor=prof, cards=cards, leading=leading,
+                           named_only=named_only,
                            mine=shown, queue_total=len(mine), page=page, pages=pages,
                            remaining=len(waiting) - len(cards),
                            accepted=[e for e in mine if e.get("professor_status") == "accept"],
@@ -772,6 +850,10 @@ def professor_home():
 @limiter.limit("600/hour")
 def professor_decide():
     prof_id = _my_professor_id()
+    if not prof_id:
+        # Not a reviewer (a grad office login, or no ?as= locally). Without
+        # this an empty id matched every applicant nobody was assigned to.
+        abort(403, description="Only the assigned professor makes the first call.")
     cas_id = request.form.get("cas_id", "")
     decision = request.form.get("decision", "")
     if decision not in PROF_DECISIONS:
@@ -918,8 +1000,8 @@ def applicants():
     coverage = degree_coverage(entries) if entries else None
     # Same person under two ids reads as two applicants unless it's called out.
     dupes = likely_duplicate_groups(entries)
-    dupe_ids = {m["cas_id"]: [x["cas_id"] for x in g if x["cas_id"] != m["cas_id"]]
-                for g in dupes for m in g}
+    dupe_ids = {m["cas_id"]: [x["cas_id"] for x in grp if x["cas_id"] != m["cas_id"]]
+                for grp in dupes for m in grp}
     shown, page, pages = _page_of(entries, request.args.get("page", 1, type=int))
     return render_template("applicants.html", summaries=shown, coverage=coverage,
                            quarantine=quarantine, flagged=flagged, dupes=dupes,
@@ -1097,6 +1179,7 @@ def _wants_json() -> bool:
 
 
 @app.route("/jobs/<job_id>")
+@role_required(ADVISOR)
 def job_status(job_id: str):
     """Poll a background ingest: what it's reading now, and how far in."""
     job = jobs.get(job_id)
@@ -1596,8 +1679,12 @@ def groups_view():
     entries = _summaries()
     professors = load_professors()
     gboard, orphans = group_board(entries, load_groups())
+    # Which faculty can actually act as a leader: naming someone on a group
+    # does nothing until their login has the Group leader role.
+    login_role = {u["professor"]: u["role"] for u in load_users()
+                  if u.get("professor") and u["role"] in FACULTY_ROLES}
     return render_template("groups.html", groups=gboard, orphans=orphans,
-                           professors=professors,
+                           professors=professors, login_role=login_role,
                            names={p["id"]: p["name"] for p in professors},
                            not_sent=[e for e in shortlisted(entries) if not e.get("group")],
                            stage_labels=STAGE_LABELS,
@@ -1631,7 +1718,7 @@ def _group_error(exc):
 def groups_add():
     name = request.form.get("name", "")
     try:
-        groups = add_group(load_groups(), name, leader=request.form.get("leader", ""),
+        groups = add_group(load_groups(), name, leaders=request.form.getlist("leaders"),
                            members=request.form.getlist("members"),
                            areas=request.form.get("areas", ""),
                            professors=load_professors())
@@ -1647,7 +1734,7 @@ def groups_update():
     gid = request.form.get("id", "")
     try:
         groups = update_group(load_groups(), gid, name=request.form.get("name", ""),
-                              leader=request.form.get("leader", ""),
+                              leaders=request.form.getlist("leaders"),
                               members=request.form.getlist("members"),
                               areas=request.form.get("areas", ""),
                               professors=load_professors())
@@ -1663,7 +1750,8 @@ def groups_update():
         if who and who not in reviewers(group) and not e.get("final_status"):
             store.update(e["cas_id"], lambda u: assign_reviewer(u, "", group), create=False)
             freed += 1
-    note = "Saved." + (f" {freed} applicant(s) went back to the leader to reassign." if freed else "")
+    note = "Saved." + (f" {freed} applicant(s) went back to the group's leaders to reassign."
+                       if freed else "")
     return _group_saved(groups, note)
 
 
@@ -1696,7 +1784,7 @@ def _group_or_404(gid: str) -> Dict[str, Any]:
         abort(404)
     user = current_user()
     if user and user["role"] != ADVISOR and not _leads(group):
-        abort(403, description="That page is for the group's leader.")
+        abort(403, description="That page is for the group's leaders.")
     return group
 
 
@@ -1717,7 +1805,8 @@ def group_home(gid: str):
     load = {p["id"]: sum(1 for e in entries if e.get("assigned_to") == p["id"]
                          and not e.get("final_status")) for p in pool}
     return render_template("group.html", group=group, stages=b, pool=pool, load=load,
-                           leader_name=names.get(group.get("leader", ""), ""),
+                           leader_names=[names.get(x, x) for x in group.get("leaders") or []],
+                           me=_my_professor_id(),
                            can_act=_leads(group), stage_labels=STAGE_LABELS,
                            total=len(entries))
 
@@ -1727,7 +1816,7 @@ def group_home(gid: str):
 def group_assign(gid: str):
     group = _group_or_404(gid)
     if not _leads(group):
-        abort(403, description="Only the group's leader assigns reviewers.")
+        abort(403, description="Only the group's leaders assign reviewers.")
     cas_id = request.form.get("cas_id", "")
     prof_id = request.form.get("reviewer", "")
     try:
@@ -1754,7 +1843,7 @@ def group_split(gid: str):
     """Hand every unassigned applicant in the group to a member, evenly."""
     group = _group_or_404(gid)
     if not _leads(group):
-        abort(403, description="Only the group's leader assigns reviewers.")
+        abort(403, description="Only the group's leaders assign reviewers.")
     store = _store()
     plan = split_evenly(store.index(), group, load_professors())
     for cas_id, prof_id in plan:
@@ -1773,7 +1862,7 @@ def group_final(gid: str):
     """The leader's final call (accept / reject / undo), with an optional note."""
     group = _group_or_404(gid)
     if not _leads(group):
-        abort(403, description="Only the group's leader makes the final call.")
+        abort(403, description="Only the group's leaders make the final call.")
     cas_id = request.form.get("cas_id", "")
     decision = request.form.get("decision", "")
     if decision not in G_CALLS + (G_UNDO,):
@@ -1782,7 +1871,8 @@ def group_final(gid: str):
     by = user["username"] if user else ""
     try:
         updated = _store().update(
-            cas_id, lambda u: apply_final_call(u, decision, leader_id=group.get("leader", ""),
+            cas_id, lambda u: apply_final_call(u, decision,
+                                               leader_id=_acting_leader(group, u),
                                                by=by, note=request.form.get("note", ""),
                                                group=group),
             create=False)
@@ -1890,7 +1980,7 @@ def professors_delete():
         # the departed reviewer's unfinished first call goes with them.
         store.update(cas_id, _unassign, create=False)
     groups = load_groups()
-    if any(prof_id in reviewers(g) for g in groups):
+    if any(prof_id in reviewers(grp) for grp in groups):
         save_groups(drop_professor(groups, prof_id))
 
     note = f"Removed {(gone or {}).get('name', prof_id)}."

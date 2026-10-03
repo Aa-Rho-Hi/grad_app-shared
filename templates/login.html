@@ -4,8 +4,8 @@
 
 <div class="card" style="max-width:420px;margin:6vh auto">
   <h3 style="margin-top:0">Sign in</h3>
-  <p class="muted">Advisors get the whole flow. Professors get the students assigned
-     to them.</p>
+  <p class="muted">The grad office gets the whole flow. Group leaders get their groups.
+     Professors get the students assigned to them.</p>
   <form method="post" style="display:flex;flex-direction:column;gap:10px;margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">

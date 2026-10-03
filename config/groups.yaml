@@ -2,7 +2,9 @@
 # the group's leader assigns reviewers from its members and makes the final
 # call. Editable here or from the app's "Groups" page; both write this file.
 #
-# `leader` and `members` are professor ids from professors.yaml. `id` is stored
+# `leaders` and `members` are professor ids from professors.yaml. A group can
+# have more than one leader; any of them can hand out applicants and make the
+# final call (they also need a Group leader login). `id` is stored
 # on applicants' records, so it is generated once and left alone: renaming a
 # group is safe, changing its id orphans whoever was already sent to it.
 #
@@ -12,7 +14,7 @@
 #   groups:
 #     - id: computer-engineering-systems
 #       name: Computer Engineering & Systems
-#       leader: gratz-paul
+#       leaders: [gratz-paul]
 #       members: [gratz-paul, duffield-nick]
 #       areas: [Computer Architecture, Networking]
 groups: []

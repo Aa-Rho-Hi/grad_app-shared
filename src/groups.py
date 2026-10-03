@@ -4,21 +4,22 @@
                                            ▲                       │
                                            └──── final call ◀── first call
 
-1. The grad office (the `advisor` role) sends each shortlisted applicant to one
-   **group** (`group` on the record).
-2. The group's **leader** splits the group's applicants among the group's
-   members (`assigned_to`), by hand or with "split evenly".
+1. The grad office sends each shortlisted applicant to one **group** (`group`
+   on the record).
+2. One of the group's **leaders** splits the group's applicants among the
+   group's members (`assigned_to`), by hand or with "split evenly". A group
+   can have several leaders, so one being away doesn't stall it.
 3. The **reviewer** makes the first call (`professor_status`, with an optional
    note for the leader).
-4. The **leader** makes the final call (`final_status`), seeing the reviewer's
+4. A **leader** makes the final call (`final_status`), seeing the reviewer's
    call and note. A leader who reviews an applicant themselves makes one call
    that counts as both.
 
 Groups live in config/groups.yaml and are made of people from the faculty list
 (config/professors.yaml), referenced by their stable professor id, so renaming
-a professor never breaks a group. A leader is simply a professor named as a
-group's leader: no new kind of account, and leading two groups or reviewing in
-one while leading another just works.
+a professor never breaks a group. Leading takes two things: being named a
+leader of the group here, and signing in with a Group leader login (users.py).
+Leading two groups, or reviewing in one while leading another, just works.
 
 Each step keeps its own field, for the same reason the advisor's swipe and the
 spreadsheet status are separate: when the reviewer and the leader disagree,
@@ -85,7 +86,9 @@ _YAML_HEADER = """\
 # the group's leader assigns reviewers from its members and makes the final
 # call. Editable here or from the app's "Groups" page; both write this file.
 #
-# `leader` and `members` are professor ids from professors.yaml. `id` is stored
+# `leaders` and `members` are professor ids from professors.yaml. A group can
+# have more than one leader; any of them can hand out applicants and make the
+# final call (they also need a Group leader login). `id` is stored
 # on applicants' records, so it is generated once and left alone: renaming a
 # group is safe, changing its id orphans whoever was already sent to it.
 #
@@ -107,8 +110,12 @@ def load_groups(path: Optional[str] = None) -> List[Dict[str, Any]]:
         if not entry.get("id") or not entry.get("name"):
             continue
         members = [str(m) for m in (entry.get("members") or []) if str(m).strip()]
+        leaders = entry.get("leaders")
+        if leaders is None:                 # files written before co-leaders
+            leaders = [entry["leader"]] if entry.get("leader") else []
+        leaders = [str(x) for x in leaders if str(x).strip()]
         out.append({"id": str(entry["id"]), "name": str(entry["name"]),
-                    "leader": str(entry.get("leader") or ""),
+                    "leaders": list(dict.fromkeys(leaders)),
                     "members": list(dict.fromkeys(members)),
                     "areas": [str(a) for a in (entry.get("areas") or []) if str(a).strip()]})
     return out
@@ -120,7 +127,7 @@ def save_groups(groups: Sequence[Dict[str, Any]], path: Optional[str] = None) ->
     path = path or GROUPS_YAML
     body = yaml.safe_dump(
         {"groups": [{"id": g["id"], "name": g["name"],
-                     **({"leader": g["leader"]} if g.get("leader") else {}),
+                     **({"leaders": list(g["leaders"])} if g.get("leaders") else {}),
                      **({"members": list(g["members"])} if g.get("members") else {}),
                      **({"areas": list(g["areas"])} if g.get("areas") else {})}
                     for g in groups]},
@@ -142,15 +149,20 @@ def group_by_id(gid: str, groups: Optional[Sequence[Dict[str, Any]]] = None):
 
 
 def reviewers(group: Dict[str, Any]) -> List[str]:
-    """Who the leader can hand an applicant to: the members, and the leader."""
+    """Who an applicant can be handed to: the members, and the leaders."""
     ids = list(group.get("members") or [])
-    if group.get("leader") and group["leader"] not in ids:
-        ids.append(group["leader"])
+    for leader in group.get("leaders") or []:
+        if leader not in ids:
+            ids.append(leader)
     return ids
 
 
+def is_leader(prof_id: str, group: Dict[str, Any]) -> bool:
+    return bool(prof_id) and prof_id in (group.get("leaders") or [])
+
+
 def led_by(prof_id: str, groups: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [g for g in groups if prof_id and g.get("leader") == prof_id]
+    return [g for g in groups if is_leader(prof_id, g)]
 
 
 def memberships(prof_id: str, groups: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -169,20 +181,23 @@ def _clean_areas(areas: Any) -> List[str]:
     return [a.strip() for a in (areas or []) if str(a).strip()]
 
 
-def _vet_people(leader: str, members: Iterable[str],
-                professors: Sequence[Dict[str, Any]]) -> Tuple[str, List[str]]:
+def _ids(values: Any) -> List[str]:
+    if isinstance(values, str):
+        values = [values]
+    return list(dict.fromkeys(str(v).strip() for v in (values or []) if str(v).strip()))
+
+
+def _vet_people(leaders: Any, members: Any,
+                professors: Sequence[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
     known = {p["id"] for p in professors}
-    leader = str(leader or "").strip()
-    members = list(dict.fromkeys(str(m).strip() for m in (members or []) if str(m).strip()))
-    if leader and leader not in known:
-        raise GroupError("The leader has to be someone on the faculty list.")
-    unknown = [m for m in members if m not in known]
+    leaders, members = _ids(leaders), _ids(members)
+    unknown = [x for x in leaders + members if x not in known]
     if unknown:
-        raise GroupError(f"Not on the faculty list: {', '.join(unknown)}")
-    return leader, members
+        raise GroupError(f"Not on the faculty list: {', '.join(dict.fromkeys(unknown))}")
+    return leaders, members
 
 
-def add_group(groups: List[Dict[str, Any]], name: str, *, leader: str = "",
+def add_group(groups: List[Dict[str, Any]], name: str, *, leaders: Any = (),
               members: Iterable[str] = (), areas: Any = None,
               professors: Sequence[Dict[str, Any]] = ()) -> List[Dict[str, Any]]:
     name = str(name or "").strip()
@@ -190,18 +205,18 @@ def add_group(groups: List[Dict[str, Any]], name: str, *, leader: str = "",
         raise GroupError("A group needs a name.")
     if any(g["name"].lower() == name.lower() for g in groups):
         raise GroupError(f"There's already a group called {name}.")
-    leader, members = _vet_people(leader, members, professors)
+    leaders, members = _vet_people(leaders, members, professors)
     taken = {g["id"] for g in groups}
     gid, n = _slug(name), 2
     base = gid
     while gid in taken:
         gid, n = f"{base}-{n}", n + 1
-    return list(groups) + [{"id": gid, "name": name, "leader": leader,
+    return list(groups) + [{"id": gid, "name": name, "leaders": leaders,
                             "members": members, "areas": _clean_areas(areas)}]
 
 
 def update_group(groups: List[Dict[str, Any]], gid: str, *, name: Optional[str] = None,
-                 leader: Optional[str] = None, members: Optional[Iterable[str]] = None,
+                 leaders: Any = None, members: Optional[Iterable[str]] = None,
                  areas: Any = None,
                  professors: Sequence[Dict[str, Any]] = ()) -> List[Dict[str, Any]]:
     """Change a group's details. The id never changes: records point at it."""
@@ -216,10 +231,10 @@ def update_group(groups: List[Dict[str, Any]], gid: str, *, name: Optional[str] 
             raise GroupError("A group needs a name.")
         if any(o["name"].lower() == new_name.lower() and o["id"] != gid for o in groups):
             raise GroupError(f"There's already a group called {new_name}.")
-        new_leader, new_members = _vet_people(
-            g["leader"] if leader is None else leader,
+        new_leaders, new_members = _vet_people(
+            g["leaders"] if leaders is None else leaders,
             g["members"] if members is None else members, professors)
-        out.append({"id": gid, "name": new_name, "leader": new_leader,
+        out.append({"id": gid, "name": new_name, "leaders": new_leaders,
                     "members": new_members,
                     "areas": g["areas"] if areas is None else _clean_areas(areas)})
     if not found:
@@ -236,7 +251,7 @@ def remove_group(groups: List[Dict[str, Any]], gid: str) -> List[Dict[str, Any]]
 
 def drop_professor(groups: List[Dict[str, Any]], prof_id: str) -> List[Dict[str, Any]]:
     """Take someone who left the faculty list out of every group."""
-    return [dict(g, leader="" if g.get("leader") == prof_id else g.get("leader", ""),
+    return [dict(g, leaders=[x for x in g.get("leaders") or [] if x != prof_id],
                  members=[m for m in g.get("members") or [] if m != prof_id])
             for g in groups]
 
@@ -306,8 +321,9 @@ def apply_first_call(unified: Dict[str, Any], decision: str, note: str = "") -> 
 
 def apply_final_call(unified: Dict[str, Any], decision: str, *, leader_id: str,
                      by: str, note: str = "", group: Dict[str, Any]) -> Dict[str, Any]:
-    """The leader's final call. Needs the reviewer's first call first, unless
-    the leader is the reviewer, in which case this one call counts as both."""
+    """A leader's final call. Needs the reviewer's first call first, unless
+    the leader making this call is the reviewer, in which case this one call
+    counts as both. `leader_id` is the professor id of the leader acting."""
     if unified.get(GROUP_FIELD) != group["id"]:
         raise GroupError("That applicant isn't in this group.")
     if decision == UNDO:
@@ -395,13 +411,13 @@ def suggest_group(entry: Dict[str, Any], groups: Sequence[Dict[str, Any]]) -> st
 def split_evenly(entries: Sequence[Dict[str, Any]], group: Dict[str, Any],
                  professors: Sequence[Dict[str, Any]] = ()) -> List[Tuple[str, str]]:
     """Hand every unassigned applicant in the group to a reviewer, keeping
-    open workloads level. Members only (the leader isn't given a share unless
-    they're listed as a member, or nobody else is). Ties go to the member whose
+    open workloads level. Members only (leaders aren't given a share unless
+    they're listed as members too, or there are no members). Ties go to the member whose
     areas match the applicant's best, then to list order.
 
     Returns [(cas_id, prof_id)] for the caller to write.
     """
-    pool = list(group.get("members") or []) or ([group["leader"]] if group.get("leader") else [])
+    pool = list(group.get("members") or []) or list(group.get("leaders") or [])
     if not pool:
         return []
     mine = in_group(entries, group["id"])

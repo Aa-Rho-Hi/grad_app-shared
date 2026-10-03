@@ -74,7 +74,8 @@ def rows_for(entries: Iterable[Dict[str, Any]],
             "status": entry.get("review_status", ""),
             "advisor_triage": entry.get("triage", ""),
             "group": group["name"] if group else (entry.get("group") or ""),
-            "group_leader": names.get(group.get("leader", ""), "") if group else "",
+            "group_leader": ", ".join(names.get(x, x) for x in group.get("leaders") or [])
+                            if group else "",
             "reviewer": names.get(reviewer, reviewer),
             "first_call": first,
             "first_call_date": (entry.get("professor_decided_at") or "")[:10],
@@ -103,7 +104,8 @@ def summarize(entries: Sequence[Dict[str, Any]],
         mine = in_group(entries, g["id"])
         b = buckets(mine)
         out.append({
-            "group": g["name"], "leader": names.get(g.get("leader", ""), ""),
+            "group": g["name"],
+            "leader": ", ".join(names.get(x, x) for x in g.get("leaders") or []),
             "sent": len(mine), "to_assign": len(b[TO_DISTRIBUTE]),
             "with_reviewers": len(b[WITH_REVIEWER]),
             "awaiting_final": len(b[READY_FOR_FINAL]),

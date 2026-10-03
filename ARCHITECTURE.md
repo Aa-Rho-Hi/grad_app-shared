@@ -188,15 +188,15 @@ Each step keeps its own field, so disagreements stay visible:
 | `review_status` | the spreadsheet's `status` column | accept / reject / tbd |
 | `triage` | the grad office's swipe | shortlist / reject |
 | `group` | the grad office (shortlist page or the card) | one group id |
-| `assigned_to` | the group leader | one member's professor id |
+| `assigned_to` | a group leader | one member's professor id |
 | `professor_status` (+ `professor_note`) | that member: the first call | accept / reject |
-| `final_status` (+ `final_note`, `final_by`) | the group leader: the final call | accept / reject |
+| `final_status` (+ `final_note`, `final_by`) | a group leader: the final call | accept / reject |
 
 Rules (`groups.py`, all unit-tested):
 
-- A group is a leader plus members, all professor ids from `config/professors.yaml`,
-  so a rename never breaks a group. A leader is just a professor named as one
-  group's leader: no new account type, and the leader can also review.
+- A group is one or more leaders plus members, all professor ids from
+  `config/professors.yaml`, so a rename never breaks a group. Leaders can also
+  review.
 - The final call needs the first call first. When the leader is the reviewer,
   one call counts as both.
 - Moving an applicant upstream clears what was downstream: a different group
@@ -209,10 +209,19 @@ Rules (`groups.py`, all unit-tested):
   reviews back to the leader; deleting a group sends its applicants back to the
   shortlist.
 
-Who sees what (`app._leads`, `app._may_view`): the grad office sees everything
-and can open a group's page but not act in it; a leader acts only in their own
-group and can open its applicants; a member sees only applicants assigned to
-them. With no logins configured there is one operator who can do everything.
+Who sees what. Three roles (`users.py`): **Grad office** (stored as
+`advisor`), **Group leader** and **Professor**. `app.role_required(*roles)`
+gates the grad office's pages; `app._leads` needs a Group leader login *and*
+being named a leader of that group (a group can have several); `app._may_view`
+lets the grad office open any applicant, a reviewer the ones assigned to them,
+and a leader their groups'. The grad office can open a group's page but never
+makes its calls, and can't stand in for a professor (`?as=` only works with no
+logins). Roles are read back from users.yaml on every request
+(`app.current_user`), so a role change or a removed account applies to open
+sessions at once; with logins on, no user means no access, never all of it.
+At least one Grad office login always remains. `tests/test_roles.py` walks
+every route as every role and fails on any route without a role decision.
+With no logins configured there is one operator who can do everything.
 
 A left swipe writes both `triage=reject` **and** `review_status=reject`, so
 the applicant leaves the tbd pool. A right swipe only sets `triage`, leaving the
@@ -229,7 +238,7 @@ a summary says; this only decides how much of it fits on screen.
 ## Output
 
 - **`status_report.py`** — the grad office's .xlsx export: one row per applicant carrying every call (spreadsheet `status`, the swipe, the group and its leader, the reviewer's first call and note, the leader's final call and note), and a per-group tally sheet. `rows_for()`/`summarize()` are plain data so the shape can be tested without openpyxl. Values, not formulas: a snapshot that silently recalculated after an edit would misreport what was true when it was taken.
-- **`users.py`** — accounts and roles. Login is off until `config/users.yaml` has an entry, which keeps the single-reviewer setup working and makes the switch explicit; passwords are PBKDF2 hashes. `advisor` reaches the whole flow, `professor` only their own queue, plus the workspace of any group they lead. Role checks return 403 rather than redirecting, and a professor's decision route re-checks `assigned_to` server-side so a copied link changes nothing.
+- **`users.py`** — accounts and the three roles (Grad office, Group leader, Professor). Login is off until `config/users.yaml` has an entry, which keeps the single-reviewer setup working and makes the switch explicit; passwords are PBKDF2 hashes. `advisor` reaches the whole flow, `professor` only their own queue, plus the workspace of any group they lead. Role checks return 403 rather than redirecting, and a professor's decision route re-checks `assigned_to` server-side so a copied link changes nothing.
 - **`jobs.py`** — a one-process background job registry so a long ingest can report progress. The upload posts by fetch, the page polls `/jobs/<id>`, and the packet ingester calls back per PDF. Nothing is persisted: a job that dies with the process is work the reviewer re-runs, and the records it already merged are in the store either way.
 - **`triage.py`** — the swipe pass: deck selection, swipe/undo semantics, the one-screen card, and the professor list (load/add/rename/delete, written back to `config/professors.yaml` atomically; ids are generated once and never rewritten so a rename can't empty a queue, and profile links are scheme-checked before they reach an `href`) with their queues.
 - **`review.py`** — the review pass above: degree extraction, status parsing and normalization (`Accept`, `deny`, `T` all land somewhere sensible; anything unrecognized is "undecided", never a guess), the `tbd` filter, and the openpyxl writer for the review workbook.

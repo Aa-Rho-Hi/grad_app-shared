@@ -16,7 +16,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSV = os.path.join(ROOT, "tests", "fixtures", "sample_applications.csv")
 FIELD_MAP = os.path.join(ROOT, "config", "csv_field_map.yaml")
 
-SYSTEMS = {"id": "systems", "name": "Systems", "leader": "gratz-paul",
+SYSTEMS = {"id": "systems", "name": "Systems", "leaders": ["gratz-paul"],
            "members": ["fan-zhiwen", "duffield-nick"], "areas": ["Networking"]}
 
 
@@ -24,18 +24,18 @@ SYSTEMS = {"id": "systems", "name": "Systems", "leader": "gratz-paul",
 
 def test_group_edits_are_vetted_against_the_faculty_list():
     profs = load_professors()
-    groups = G.add_group([], "Systems", leader="gratz-paul",
+    groups = G.add_group([], "Systems", leaders=["gratz-paul"],
                          members=["fan-zhiwen", "fan-zhiwen"], professors=profs)
     assert groups[0]["id"] == "systems" and groups[0]["members"] == ["fan-zhiwen"]
     with pytest.raises(G.GroupError):
         G.add_group(groups, "systems", professors=profs)          # duplicate name
     with pytest.raises(G.GroupError):
-        G.add_group(groups, "Power", leader="nobody", professors=profs)
+        G.add_group(groups, "Power", leaders=["nobody"], professors=profs)
     with pytest.raises(G.GroupError):
         G.update_group(groups, "systems", members=["ghost"], professors=profs)
     renamed = G.update_group(groups, "systems", name="Comp Eng", professors=profs)
     assert renamed[0]["id"] == "systems"                        # id never changes
-    assert G.drop_professor(renamed, "gratz-paul")[0]["leader"] == ""
+    assert G.drop_professor(renamed, "gratz-paul")[0]["leaders"] == []
     assert G.remove_group(renamed, "systems") == []
 
 
@@ -145,8 +145,8 @@ def test_suggest_group_from_areas():
 
 @pytest.fixture
 def office(tmp_path, monkeypatch):
-    """Roster loaded, one group, and four logins: the grad office, the
-    group's leader, a member, and a professor from outside the group."""
+    """Roster loaded and four logins: the grad office, a Group leader (who
+    will lead Systems), a member, and a professor from outside the group."""
     from src import app as appmod
     from src import users as usersmod
     from src.run import run
@@ -160,7 +160,7 @@ def office(tmp_path, monkeypatch):
     for cas in ids:
         store.update(cas, lambda u: {**u, "review_status": "tbd", "triage": "shortlist"})
     people = usersmod.add_user([], "office", "pw", usersmod.ADVISOR)
-    people = usersmod.add_user(people, "pgratz", "pw", usersmod.PROFESSOR, "gratz-paul")
+    people = usersmod.add_user(people, "pgratz", "pw", usersmod.LEADER, "gratz-paul")
     people = usersmod.add_user(people, "pfan", "pw", usersmod.PROFESSOR, "fan-zhiwen")
     people = usersmod.add_user(people, "pkrishna", "pw", usersmod.PROFESSOR,
                                "narayanan-krishna")
@@ -181,7 +181,7 @@ def test_the_whole_flow(office):
 
     # grad office sets up the group and sends an applicant to it
     _as(client, "office")
-    client.post("/groups/add", data={"name": "Systems", "leader": "gratz-paul",
+    client.post("/groups/add", data={"name": "Systems", "leaders": ["gratz-paul"],
                                      "members": ["fan-zhiwen", "duffield-nick"]})
     assert [g["id"] for g in G.load_groups()] == ["systems"]
     assert client.post("/triage/assign", data={"cas_id": cas, "group": "systems"},
@@ -259,7 +259,7 @@ def test_the_whole_flow(office):
 def test_split_evenly_and_membership_changes(office):
     appmod, client, store, ids = office
     _as(client, "office")
-    client.post("/groups/add", data={"name": "Systems", "leader": "gratz-paul",
+    client.post("/groups/add", data={"name": "Systems", "leaders": ["gratz-paul"],
                                      "members": ["fan-zhiwen", "duffield-nick"]})
     for cas in ids:
         client.post("/triage/assign", data={"cas_id": cas, "group": "systems"})
@@ -272,7 +272,7 @@ def test_split_evenly_and_membership_changes(office):
     # dropping a member sends their open reviews back to the leader
     _as(client, "office")
     client.post("/groups/update", data={"id": "systems", "name": "Systems",
-                                        "leader": "gratz-paul", "members": ["fan-zhiwen"]})
+                                        "leaders": ["gratz-paul"], "members": ["fan-zhiwen"]})
     who = [store.get(cas).get("assigned_to") for cas in ids]
     assert who.count("duffield-nick") == 0 and who.count(None) == 2
 

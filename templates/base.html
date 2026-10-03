@@ -116,7 +116,7 @@
       </div>
       {% if user %}
       <div class="who">
-        <span>{{ user.username }} · {{ user.role }}</span>
+        <span>{{ user.username }} · {{ role_labels.get(user.role, user.role) }}</span>
         <form action="{{ url_for('logout') }}" method="post" style="display:inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button type="submit">Sign out</button>

@@ -67,23 +67,32 @@ pandas/openpyxl, and numeric-looking IDs (e.g. `1001.0`) are cleaned back to tex
 - **GPA scale varies per university**, so it is auto-detected per value (≤4.3→4.0, ≤5→5.0, ≤10→10.0, ≤20→20.0, else→100) and normalized to 4.0. Force a scale with `gpa.gpa_scale` in `config/csv_field_map.yaml`.
 - **Data-quality flags** (e.g. "No GRE score on file") are factual notes for the reviewer, shown in the UI — not judgements.
 
-## Review groups
+## Roles and review groups
 
-Shortlisted applicants go to **groups**, not straight to a professor:
+Three roles, each reaching only its own part of the app (set on the Accounts
+page; `tests/test_roles.py` hits every route as every role):
 
-1. The grad office sends each one to a group (shortlist page, or the picker on
-   the triage card).
-2. The group's **leader** hands them to members of the group (one by one, or
-   "Split evenly").
-3. The member makes the **first call** (accept / pass, with an optional note).
-4. The leader makes the **final call**, seeing the member's call and note.
+| Role | Can |
+|---|---|
+| **Grad office** | Everything: accounts, faculty list, groups, rules; uploads, prescreen, triage, sending applicants to groups; every applicant and report. Can open a group's page but not make its calls. |
+| **Group leader** | Only groups they're named a leader of: see those applicants, hand them to members, make the final call. Also reviews applicants assigned to them. |
+| **Professor** | Only applicants assigned to them: read the file, make the first call with a note. |
 
-Groups are a leader plus members picked from the faculty list, set up on the
-Groups page (or `config/groups.yaml`). A leader is just a professor login
-named as a group's leader; they see a "Groups you lead" panel on their page.
-Members only see applicants assigned to them; the grad office sees everything
-but leaves the final call to the leader. The status report has one row per
-applicant with the group, reviewer, both calls and both notes.
+The flow for a shortlisted applicant:
+
+1. The grad office sends them to a group (shortlist page, or the triage card).
+2. A leader of the group hands them to a member (one by one, or "Split evenly").
+3. The member makes the **first call** (accept / pass, optional note).
+4. A leader makes the **final call**, seeing the member's call and note.
+
+Groups are set up on the Groups page (or `config/groups.yaml`): leaders and
+members picked from the faculty list. A group can have several leaders, so one
+being away doesn't hold it up. Leading takes both a Group leader login and
+being named on the group; the Groups page flags a named leader whose login
+isn't a Group leader yet. Roles are re-read on every request, so a change on
+the Accounts page applies immediately, and there's always at least one Grad
+office login. The status report has one row per applicant with the group,
+leaders, reviewer, both calls and both notes.
 
 ## Prescreen (grad office rules)
 

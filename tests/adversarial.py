@@ -342,7 +342,7 @@ def main(tmp):
 
     r = c3.post("/login", data={"username": "climber", "password": "pw1234"},
                 follow_redirects=True)
-    check("a pending account can't sign in", b"waiting for an advisor" in r.data)
+    check("a pending account can't sign in", b"waiting for the grad office" in r.data)
     for gated in ("/applicants", "/accounts", "/prof", "/download/status.xlsx"):
         rr = c3.get(gated)
         check(f"pending account is refused {gated}", rr.status_code in (302, 401, 403),

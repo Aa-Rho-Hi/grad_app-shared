@@ -12,9 +12,11 @@
     <a href="{{ url_for('groups_view', edit=None if editing else 1) }}"><button type="button">
       {{ '← Back to groups' if editing else '✎ Edit groups' }}</button></a>
   </div>
-  <p class="muted" style="margin:8px 0 0">You send each shortlisted applicant to a group. The
-     group's leader hands them to members, each member makes the first call, and the leader
-     makes the final call.</p>
+  <p class="muted" style="margin:8px 0 0">You send each shortlisted applicant to a group. A
+     leader of the group hands them to members, each member makes the first call, and a leader
+     makes the final call. A group can have more than one leader, so one being away doesn't
+     hold things up. Leaders also need a <b>Group leader</b> login
+     {%- if logins_on %} (set on <a href="{{ url_for('accounts') }}">Accounts</a>){% endif %}.</p>
 </div>
 
 {% if editing %}
@@ -28,11 +30,13 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="row">
       <input type="text" name="name" placeholder="Group name" required>
-      <select name="leader">
-        <option value="">Leader…</option>
-        {% for p in professors %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
-      </select>
       <input type="text" name="areas" placeholder="Areas, comma separated (optional)">
+    </div>
+    <div class="members">
+      <span class="muted" style="font-size:12px">Leaders:</span>
+      {% for p in professors %}
+      <label><input type="checkbox" name="leaders" value="{{ p.id }}"> {{ p.name }}</label>
+      {% endfor %}
     </div>
     <div class="members">
       <span class="muted" style="font-size:12px">Members:</span>
@@ -51,11 +55,13 @@
     <input type="hidden" name="id" value="{{ g.id }}">
     <div class="row">
       <input type="text" name="name" value="{{ g.name }}" required>
-      <select name="leader">
-        <option value="" {{ 'selected' if not g.leader }}>No leader</option>
-        {% for p in professors %}<option value="{{ p.id }}" {{ 'selected' if g.leader == p.id }}>{{ p.name }}</option>{% endfor %}
-      </select>
       <input type="text" name="areas" value="{{ g.areas|join(', ') }}" placeholder="Areas">
+    </div>
+    <div class="members">
+      <span class="muted" style="font-size:12px">Leaders:</span>
+      {% for p in professors %}
+      <label><input type="checkbox" name="leaders" value="{{ p.id }}" {{ 'checked' if p.id in g.leaders }}> {{ p.name }}</label>
+      {% endfor %}
     </div>
     <div class="members">
       <span class="muted" style="font-size:12px">Members:</span>
@@ -92,11 +98,18 @@
     <span class="chip {{ 's' if g.applicants else '' }}">{{ g.applicants|length }} sent</span>
   </div>
   <div class="muted" style="font-size:13px;margin-top:4px">
-    Leader: {{ names.get(g.leader) or 'none set' }}
+    Leaders: {% if g.leaders %}{% for x in g.leaders %}{{ names.get(x, x) }}{{ ', ' if not loop.last }}{% endfor %}{% else %}none set{% endif %}
     · Members: {% if g.members %}{% for m in g.members %}{{ names.get(m, m) }}{{ ', ' if not loop.last }}{% endfor %}{% else %}none yet{% endif %}
     {% if g.areas %}· Areas: {{ g.areas|join(', ') }}{% endif %}
   </div>
-  {% if not g.leader %}<p class="muted" style="color:var(--low)">No leader set: nobody can assign reviewers or make final calls for this group.</p>{% endif %}
+  {% if not g.leaders %}<p class="muted" style="color:var(--low)">No leader set: nobody can assign reviewers or make final calls for this group.</p>
+  {% elif logins_on %}
+    {% for x in g.leaders if login_role.get(x) != 'leader' %}
+    <p class="muted" style="color:var(--low);margin:6px 0 0">{{ names.get(x, x) }} is named a leader but
+      {% if login_role.get(x) %}signs in as a Professor{% else %}has no login yet{% endif %}, so can't act
+      for this group until their login is a <b>Group leader</b> (<a href="{{ url_for('accounts') }}">Accounts</a>).</p>
+    {% endfor %}
+  {% endif %}
   <div class="chips" style="margin-top:8px">
     {% for key in ['to_distribute', 'with_reviewer', 'ready_for_final', 'decided'] %}
       {% if g.stages[key] %}<span class="chip {{ 's' if key == 'decided' else 'd-tbd' }}">{{ g.stages[key]|length }} {{ stage_labels[key] }}</span>{% endif %}

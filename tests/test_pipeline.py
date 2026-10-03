@@ -753,7 +753,7 @@ def _make_group(name="Systems", leader="gratz-paul", members=("fan-zhiwen",)):
     """One review group in the per-test groups file (conftest isolates it)."""
     from src import groups as groupsmod
     from src.triage import load_professors
-    groups = groupsmod.add_group(groupsmod.load_groups(), name, leader=leader,
+    groups = groupsmod.add_group(groupsmod.load_groups(), name, leaders=[leader],
                                  members=list(members), professors=load_professors())
     groupsmod.save_groups(groups)
     return groups[-1]["id"]
@@ -1444,7 +1444,7 @@ def test_signup_creates_a_request_not_an_account(tmp_path, monkeypatch):
     # right password, still no way in — and no session is minted
     r = client.post("/login", data={"username": "stranger", "password": "pw1234"},
                     follow_redirects=True)
-    assert b"waiting for an advisor" in r.data
+    assert b"waiting for the grad office" in r.data
     for gated in ("/step/1", "/applicants", "/prof", "/accounts"):
         assert client.get(gated).status_code in (302, 403), gated
 
@@ -1542,14 +1542,16 @@ def test_one_login_per_professor(tmp_path, monkeypatch):
     assert next(u for u in usersmod.load_users()
                 if u["username"] == "impostor")["role"] == usersmod.PENDING
 
-    # the taken one isn't even offered
-    page = client.get("/accounts").get_data(as_text=True)
-    assert 'value="gratz-paul"' not in page
-    assert 'value="fan-zhiwen"' in page            # still free
+    # the taken one isn't even offered when approving someone
+    # (pgratz's own row still shows his own link in its change-role form)
+    waiting = client.get("/accounts").get_data(as_text=True).split("Waiting for approval", 1)[1]
+    assert 'value="gratz-paul"' not in waiting
+    assert 'value="fan-zhiwen"' in waiting         # still free
 
     # freeing it up makes it assignable again
     client.post("/accounts/remove", data={"username": "pgratz"})
-    assert 'value="gratz-paul"' in client.get("/accounts").get_data(as_text=True)
+    waiting = client.get("/accounts").get_data(as_text=True).split("Waiting for approval", 1)[1]
+    assert 'value="gratz-paul"' in waiting
     client.post("/accounts/approve", data={"username": "impostor",
                                            "role": "professor",
                                            "professor": "gratz-paul"})
@@ -1570,7 +1572,8 @@ def test_when_every_professor_is_taken_the_page_says_so(tmp_path, monkeypatch):
 
     page = client.get("/accounts").get_data(as_text=True)
     assert "Every professor on the list already has a login" in page
-    assert 'value="gratz-paul"' not in page, "the taken one must not be offered"
+    waiting = page.split("Waiting for approval", 1)[1]
+    assert 'value="gratz-paul"' not in waiting, "the taken one must not be offered"
     assert 'value="__new__"' in page, "but a new colleague is still addable"
     # ...and the role itself must stay choosable, or the advice above it is a
     # lie: the page says "pick someone not on the list yet" while the dropdown
@@ -2030,7 +2033,7 @@ def test_deleting_a_professor_frees_their_queue(tmp_path, monkeypatch):
     rec = store.get(cas)
     assert "assigned_to" not in rec and rec["group"] == gid and rec["triage"] == "shortlist"
     g = groupsmod.load_groups()[0]
-    assert g["leader"] == "" and g["members"] == []
+    assert g["leaders"] == [] and g["members"] == []
     assert "not assigned yet" in client.get("/professors").get_data(as_text=True).lower()
 
 

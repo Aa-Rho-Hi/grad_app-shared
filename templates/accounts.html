@@ -8,24 +8,56 @@
 
 <div class="card">
   <h3 style="margin-top:0">Accounts</h3>
-  <p class="muted">Who can sign in, and as what. An <b>advisor</b> (the grad office) gets the
-     whole flow and sends applicants to groups; a <b>professor</b> sees only the students
-     their group leader assigned to them. A professor who is named a group's leader on the
-     <a href="{{ url_for('groups_view') }}">Groups page</a> also gets that group's workspace:
-     handing out applicants and making the final call. No separate account needed.</p>
+  <p class="muted">Who can sign in, and as what. Three roles, and each one only reaches
+     its own part of the app:</p>
+  <table style="margin-top:6px">
+    <tbody>
+      {% for role, what in role_access %}
+      <tr><td style="white-space:nowrap;vertical-align:top"><span class="chip {{ 's' if role == 'advisor' else 'd-tbd' if role == 'leader' else '' }}">{{ role_labels[role] }}</span></td>
+          <td class="muted" style="font-size:13px">{{ what }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted" style="font-size:13px;margin-top:10px">A Group leader also has to be named a
+     leader of a group on the <a href="{{ url_for('groups_view') }}">Groups page</a>; the role
+     alone leads nothing. Changes take effect on the person's next click, no sign-out needed.</p>
 
   {% if users %}
   <table style="margin-top:10px">
-    <thead><tr><th>Username</th><th>Role</th><th>Professor</th><th></th></tr></thead>
+    <thead><tr><th>Username</th><th>Role</th><th>Faculty member</th><th>Change role</th><th></th></tr></thead>
     <tbody>
       {% for u in users %}
+      {% set mine = user and u.username == user.username %}
       <tr>
-        <td>{{ u.username }}{% if user and u.username == user.username %}
-            <span class="muted">· you</span>{% endif %}</td>
-        <td><span class="chip {{ 's' if u.role == 'advisor' }}">{{ u.role }}</span></td>
-        <td class="muted">{{ u.professor or '—' }}</td>
+        <td>{{ u.username }}{% if mine %} <span class="muted">· you</span>{% endif %}</td>
+        <td><span class="chip {{ 's' if u.role == 'advisor' else 'd-tbd' if u.role == 'leader' else '' }}">{{ role_labels.get(u.role, u.role) }}</span>
+          {% if u.role == 'leader' %}
+            <div class="muted" style="font-size:12px;margin-top:3px">
+              {% if leads.get(u.professor) %}leads {{ leads[u.professor]|join(', ') }}
+              {% else %}<span style="color:var(--low)">not named on any group yet</span>{% endif %}</div>
+          {% endif %}</td>
+        <td class="muted">{{ names.get(u.professor, u.professor) or '—' }}</td>
+        <td>
+          {% if not mine %}
+          <form action="{{ url_for('accounts_role') }}" method="post" class="aform role-form" style="gap:6px">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="username" value="{{ u.username }}">
+            <select name="role" class="ap-role" aria-label="Role for {{ u.username }}">
+              {% for r in roles %}<option value="{{ r }}" {{ 'selected' if r == u.role }}>{{ role_labels[r] }}</option>{% endfor %}
+            </select>
+            <select name="professor" class="ap-prof" aria-label="Faculty member for {{ u.username }}">
+              <option value="">— which faculty member —</option>
+              {% for p in faculty if p.id == u.professor or p.id not in taken %}
+              <option value="{{ p.id }}" {{ 'selected' if p.id == u.professor }}>{{ p.name }}</option>
+              {% endfor %}
+            </select>
+            <input type="text" name="new_professor" class="ap-new" style="display:none">
+            <button type="submit" style="font-size:12px;padding:5px 11px">Change</button>
+          </form>
+          {% else %}<span class="muted" style="font-size:12px">another grad office login can change yours</span>{% endif %}
+        </td>
         <td style="text-align:right">
-          {% if not (user and u.username == user.username) %}
+          {% if not mine %}
           <form action="{{ url_for('accounts_remove') }}" method="post" style="display:inline"
                 onsubmit="return confirm('Remove the login for {{ u.username }}?')">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -83,7 +115,8 @@
                a way to be a professor. #}
             <select name="role" class="ap-role">
               <option value="professor">Professor</option>
-              <option value="advisor">Advisor</option>
+              <option value="leader">Group leader</option>
+              <option value="advisor">Grad office</option>
             </select>
             <select name="professor" class="ap-prof" required>
               <option value="">— which professor —</option>
@@ -117,8 +150,9 @@
   <ol class="muted" style="margin:10px 0 0;padding-left:20px;line-height:1.9">
     <li>They open the sign-in page, click <b>Create account</b>, and choose their
         own username and password.</li>
-    <li>Their request appears above. You approve it and say what they are.</li>
-    <li>For a professor, pick them from the list — or <i>someone not on the list
+    <li>Their request appears above. You approve it and say what they are:
+        Grad office, Group leader or Professor.</li>
+    <li>For a professor or group leader, pick them from the list — or <i>someone not on the list
         yet</i> and type their name, which adds them to
         <a href="{{ url_for('professors_view', edit=1) }}">the faculty list</a>
         and links the account in one go.</li>
@@ -137,14 +171,15 @@
 </style>
 
 <script>
-// A professor login needs a professor; an advisor login doesn't. And picking
-// "someone not on the list yet" swaps the dropdown for a name box.
+// A professor or group leader login needs a faculty member; a grad office
+// login doesn't. And picking "someone not on the list yet" swaps the dropdown
+// for a name box.
 document.querySelectorAll('.ap-role').forEach(role => {
   const form = role.closest('form');
   const prof = form.querySelector('.ap-prof');
   const fresh = form.querySelector('.ap-new');
   const sync = () => {
-    const isProf = role.value === 'professor';
+    const isProf = role.value === 'professor' || role.value === 'leader';
     const isNew = isProf && prof.value === '__new__';
     prof.style.display = isProf ? '' : 'none';
     prof.required = isProf;

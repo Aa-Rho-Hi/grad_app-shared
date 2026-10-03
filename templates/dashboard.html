@@ -51,8 +51,8 @@
 <div class="card">
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
     <h3 style="margin:0"><a href="{{ url_for('group_home', gid=g.id) }}">{{ g.name }}</a>
-      <span class="muted" style="font-weight:400;font-size:13px">· leader:
-        {{ names.get(g.leader) or 'none set' }}</span></h3>
+      <span class="muted" style="font-weight:400;font-size:13px">· {{ 'leaders' if g.leaders|length > 1 else 'leader' }}:
+        {% if g.leaders %}{% for x in g.leaders %}{{ names.get(x, x) }}{{ ', ' if not loop.last }}{% endfor %}{% else %}none set{% endif %}</span></h3>
     <div class="chips" style="margin:0">
       {% if g.stages.to_distribute %}<span class="chip d-tbd">{{ g.stages.to_distribute|length }} to assign</span>{% endif %}
       {% if g.stages.with_reviewer %}<span class="chip d-tbd">{{ g.stages.with_reviewer|length }} with reviewers</span>{% endif %}

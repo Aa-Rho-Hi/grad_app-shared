@@ -1,10 +1,20 @@
-"""Accounts and roles — one app, two jobs.
+"""Accounts and roles — one app, three jobs.
 
-    advisor    the whole flow: upload, the review spreadsheet, triage, and
-               sending shortlisted applicants to review groups
-    professor  the students their group leader assigned to them; a professor
-               named as a group's leader (config/groups.yaml) also gets that
-               group's workspace: handing out applicants, the final call
+    Grad office   (`advisor`)  everything: setup (accounts, faculty, groups,
+                               rules), uploads, prescreen, triage, sending
+                               applicants to groups, every report. Can look at
+                               a group's page but never makes a group's calls.
+    Group leader  (`leader`)   the groups they're named a leader of, and only
+                               those: hand applicants to members, make the
+                               final call. Also reviews like a professor.
+    Professor     (`professor`) only the applicants assigned to them: the
+                               first call.
+
+Leading a group takes both the Group leader role here and being named a
+leader of that group in config/groups.yaml. Either alone isn't enough: a role
+with no group leads nothing, and a professor login named on a group can't act
+for it until the grad office changes the role. The stored value for the grad
+office is still `advisor` so existing users.yaml files keep working.
 
 Login is **off until you create a user**. A single reviewer on a laptop
 shouldn't have to authenticate to themselves, and every existing route keeps
@@ -46,8 +56,25 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 USERS_YAML = (os.environ.get("GRADAPP_USERS_FILE", "").strip()
               or os.path.join(ROOT, "config", "users.yaml"))
 
-ADVISOR, PROFESSOR = "advisor", "professor"
-ROLES = (ADVISOR, PROFESSOR)
+ADVISOR, LEADER, PROFESSOR = "advisor", "leader", "professor"
+ROLES = (ADVISOR, LEADER, PROFESSOR)
+#: Roles whose login stands for one person on the faculty list.
+FACULTY_ROLES = (LEADER, PROFESSOR)
+
+ROLE_LABELS = {ADVISOR: "Grad office", LEADER: "Group leader", PROFESSOR: "Professor",
+               "pending": "Waiting for approval"}
+
+#: What each role can do, in words. Shown on the Accounts page; the routes in
+#: app.py enforce it, and tests/test_roles.py checks every route against it.
+ROLE_ACCESS = [
+    (ADVISOR, "Everything: accounts, faculty list, groups and rules; uploads, prescreen, "
+              "triage, sending applicants to groups; every applicant and every report. "
+              "Can open a group's page but can't make its calls."),
+    (LEADER, "Only the groups they're named a leader of: see those applicants, hand them "
+             "to members, make the final call. Also reviews applicants assigned to them."),
+    (PROFESSOR, "Only applicants assigned to them: read the file, make the first call "
+                "with a note for the leader."),
+]
 
 #: A self-signup that an advisor hasn't approved yet. Deliberately stored *as
 #: the role* rather than as an `approved: false` flag beside a real one: every
@@ -61,7 +88,10 @@ STORED_ROLES = ROLES + (PENDING,)
 _HEADER = """\
 # Accounts. Delete every entry here and the app goes back to no-login mode.
 #
-#   role: advisor    -> the whole flow (upload, spreadsheet, triage, queues)
+#   role: advisor    -> the grad office: everything (setup, uploads, triage,
+#                       sending applicants to groups, reports)
+#   role: leader     -> group leader: their groups' applicants, hand-out and
+#                       the final call; needs `professor` like a professor does
 #   role: professor  -> only the students assigned to them; needs `professor`
 #                       to name which entry in professors.yaml they are
 #
@@ -148,7 +178,7 @@ def authenticate(username: str, password: str,
 def linked_professors(users: List[Dict[str, Any]], *, ignoring: str = "") -> Dict[str, str]:
     """{professor id: the username already holding it}."""
     return {u["professor"]: u["username"] for u in users
-            if u["professor"] and u["role"] == PROFESSOR
+            if u["professor"] and u["role"] in FACULTY_ROLES
             and u["username"] != ignoring}
 
 
@@ -169,18 +199,18 @@ def _vet_professor(role: str, professor: str,
       genuinely needs a new login, remove the old account first — deliberate
       and visible, rather than two accounts nobody remembers creating.
     """
-    if role != PROFESSOR:
+    if role not in FACULTY_ROLES:
         return ""
     from .triage import load_professors        # local: triage imports upward
     faculty = load_professors()
     if not faculty:
         raise UserError(
             "There are no professors on the faculty list yet. Add one under "
-            "Professor queues first — a professor login has to point at "
+            "Faculty first — a professor or group leader login has to point at "
             "someone who exists.")
     if not professor:
-        raise UserError("A professor account has to name someone on the "
-                        "faculty list.")
+        raise UserError("A professor or group leader account has to name "
+                        "someone on the faculty list.")
     if not any(p["id"] == professor for p in faculty):
         raise UserError(f"No professor with id {professor!r} on the faculty "
                         "list (see config/professors.yaml).")
@@ -247,10 +277,39 @@ def approve_user(users: List[Dict[str, Any]], username: str, role: str,
     return out
 
 
+def _keeps_a_grad_office(before: List[Dict[str, Any]], after: List[Dict[str, Any]]) -> None:
+    """Refuse a change that leaves working logins but no grad office login:
+    nobody could then approve, change or remove anyone, and getting back in
+    would need the command line on the server."""
+    had = any(u["role"] == ADVISOR for u in before)
+    if had and approved_users(after) and not any(u["role"] == ADVISOR for u in after):
+        raise UserError("At least one Grad office login has to remain.")
+
+
+def set_role(users: List[Dict[str, Any]], username: str, role: str,
+             professor: str = "") -> List[Dict[str, Any]]:
+    """Change an existing account's role (e.g. make a professor a group
+    leader). Faculty roles keep or take a professor link; the grad office
+    role drops it."""
+    if role not in ROLES:
+        raise UserError(f"Role must be one of {', '.join(ROLES)}.")
+    current = next((u for u in users if u["username"] == username), None)
+    if not current or current["role"] == PENDING:
+        raise UserError("No such account (approve a pending request instead).")
+    if role in FACULTY_ROLES and not professor:
+        professor = current.get("professor", "")
+    professor = _vet_professor(role, professor, users, username)
+    out = [{**u, "role": role, "professor": professor} if u["username"] == username else u
+           for u in users]
+    _keeps_a_grad_office(users, out)
+    return out
+
+
 def remove_user(users: List[Dict[str, Any]], username: str) -> List[Dict[str, Any]]:
     out = [u for u in users if u["username"] != username]
     if len(out) == len(users):
         raise UserError("No such user.")
+    _keeps_a_grad_office(users, out)
     return out
 
 
@@ -264,7 +323,13 @@ def main() -> None:
     a.add_argument("--username", required=True)
     a.add_argument("--password", required=True)
     a.add_argument("--role", required=True, choices=ROLES)
-    a.add_argument("--professor", default="", help="professor id, for role=professor")
+    a.add_argument("--professor", default="",
+                   help="professor id, for role=professor or role=leader")
+
+    s_ = sub.add_parser("role", help="change an account's role")
+    s_.add_argument("--username", required=True)
+    s_.add_argument("--role", required=True, choices=ROLES)
+    s_.add_argument("--professor", default="", help="professor id, for leader/professor")
 
     r = sub.add_parser("remove", help="delete an account (or reject a request)")
     r.add_argument("--username", required=True)
@@ -272,7 +337,8 @@ def main() -> None:
     ap_ = sub.add_parser("approve", help="grant a pending signup a role")
     ap_.add_argument("--username", required=True)
     ap_.add_argument("--role", required=True, choices=ROLES)
-    ap_.add_argument("--professor", default="", help="professor id, for role=professor")
+    ap_.add_argument("--professor", default="",
+                     help="professor id, for role=professor or role=leader")
 
     d = sub.add_parser("demo", help="an advisor plus one login per professor")
     d.add_argument("--password", required=True, help="used for every demo account")
@@ -286,6 +352,9 @@ def main() -> None:
         # can't disagree about what a valid professor account looks like.
         save_users(add_user(users, args.username, args.password, args.role, args.professor))
         print(f"Added {args.username} ({args.role}).")
+    elif args.cmd == "role":
+        save_users(set_role(users, args.username, args.role, args.professor))
+        print(f"{args.username} is now {ROLE_LABELS[args.role]}.")
     elif args.cmd == "remove":
         save_users(remove_user(users, args.username))
         print(f"Removed {args.username}.")

@@ -22,6 +22,15 @@
 </div>
 {% endif %}
 
+{% if named_only %}
+<div class="card" style="margin-bottom:14px">
+  <p class="muted" style="margin:0">You're named a leader of
+    {% for grp in named_only %}<b>{{ grp.name }}</b>{{ ', ' if not loop.last }}{% endfor %},
+    but your login is a Professor login, so you can't hand out applicants or make final
+    calls yet. Ask the grad office to change your login to <b>Group leader</b>.</p>
+</div>
+{% endif %}
+
 <div class="deck-head">
   <div>
     <h3 style="margin:0">{{ professor.name }}</h3>

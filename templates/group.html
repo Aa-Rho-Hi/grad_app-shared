@@ -42,8 +42,9 @@
   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
     <div>
       <h3 style="margin:0">{{ group.name }}</h3>
-      <p class="muted" style="margin:4px 0 0">Leader: {{ leader_name or 'none set' }} · {{ total }} applicant(s) sent here.
-        Hand each one to a member; they make the first call, you make the final call.</p>
+      <p class="muted" style="margin:4px 0 0">{{ 'Leaders' if leader_names|length > 1 else 'Leader' }}:
+        {{ leader_names|join(', ') or 'none set' }} · {{ total }} applicant(s) sent here.
+        Hand each one to a member; they make the first call, a leader makes the final call.</p>
     </div>
     {% if can_act and stages.to_distribute and pool %}
     <form action="{{ url_for('group_split', gid=group.id) }}" method="post">
@@ -58,7 +59,8 @@
   </div>
   {% if not can_act %}
   <p class="muted" style="margin:10px 0 0">You're looking at this group as the grad office.
-    Only {{ leader_name or 'its leader' }} can assign reviewers and make final calls.</p>
+    Only its leaders ({{ leader_names|join(', ') or 'none set yet' }}) can assign reviewers and
+    make final calls.</p>
   {% endif %}
 </div>
 
@@ -91,7 +93,7 @@
   <table><thead><tr><th>Applicant</th><th>Reviewer</th><th></th></tr></thead><tbody>
     {% for a in stages.with_reviewer %}
     <tr><td>{{ who(a) }}</td><td>{{ reviewer_form(a) }}</td>
-        <td>{% if can_act and a.assigned_to == group.leader %}<span class="muted" style="font-size:12px">You're the reviewer, so one call counts as both:</span>{{ final_form(a) }}
+        <td>{% if can_act and a.assigned_to in group.leaders and (not logins_on or a.assigned_to == me) %}<span class="muted" style="font-size:12px">You're the reviewer, so one call counts as both:</span>{{ final_form(a) }}
             {% else %}{{ call_chip('') }}{% endif %}</td></tr>
     {% endfor %}
   </tbody></table>
