@@ -8,7 +8,7 @@
 
 <p class="back"><a href="{{ url_for('applicants') }}">All applicants</a>
    &nbsp;·&nbsp; <a href="{{ url_for('triage_shortlist') }}">Shortlist ({{ shortlist_count }})</a>
-   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Professor queues</a></p>
+   &nbsp;·&nbsp; <a href="{{ url_for('groups_view') }}">Groups</a></p>
 
 {% if cards %}
 <div class="deck-head">
@@ -35,7 +35,7 @@
 <div id="done" class="card" style="display:none">
   <h3 style="margin-top:0">Done</h3>
   <p class="muted">Every tbd applicant has been read.
-     <a href="{{ url_for('triage_shortlist') }}">Open the shortlist</a> to hand them to a professor.</p>
+     <a href="{{ url_for('triage_shortlist') }}">Open the shortlist</a> to send them to a review group.</p>
 </div>
 
 {% else %}
@@ -146,18 +146,18 @@
       .catch(() => { window.toast('Could not load more applicants', 'bad'); });
   }
 
-  function post(cas, direction, professor){
+  function post(cas, direction, group){
     return fetch("{{ url_for('triage_swipe') }}", {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: new URLSearchParams({cas_id: cas, direction: direction,
-                                 professor: professor || '', csrf_token: token})
+                                 group: group || '', csrf_token: token})
     });
   }
 
-  // Whoever the card's dropdown names — only meaningful on a right swipe.
+  // Whichever group the card's dropdown names — only meaningful on a right swipe.
   function pick(card){
-    const sel = card.querySelector('.prof-pick');
+    const sel = card.querySelector('.group-pick');
     return sel ? sel.value : '';
   }
 

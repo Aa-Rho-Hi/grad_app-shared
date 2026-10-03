@@ -422,7 +422,7 @@ gcloud run deploy "$SERVICE" \
   `# gcloud takes the last occurrence and silently drops the rest, which would` \
   `# leave GRADAPP_ENV unset and boot the container in local mode -- SQLite, no` \
   `# bucket, and none of the cloud guardrails, with nothing to indicate it.` \
-  --set-env-vars "GRADAPP_ENV=cloud,GRADAPP_BUCKET=${BUCKET},GRADAPP_DATA=/tmp/gradapp-data,GRADAPP_USERS_FILE=/tmp/gradapp-data/config/users.yaml,GRADAPP_PROFESSORS_FILE=/tmp/gradapp-data/config/professors.yaml" \
+  --set-env-vars "GRADAPP_ENV=cloud,GRADAPP_BUCKET=${BUCKET},GRADAPP_DATA=/tmp/gradapp-data,GRADAPP_USERS_FILE=/tmp/gradapp-data/config/users.yaml,GRADAPP_PROFESSORS_FILE=/tmp/gradapp-data/config/professors.yaml,GRADAPP_GROUPS_FILE=/tmp/gradapp-data/config/groups.yaml" \
   --set-secrets "GRADAPP_DATABASE_URL=${NAME}-db-url:latest,GRADAPP_SECRET_KEY=${NAME}-secret-key:latest,GRADAPP_SETUP_TOKEN=${NAME}-setup-token:latest" \
   --memory 2Gi --cpu 2 --timeout 900 \
   --min-instances 0 --max-instances 4 \

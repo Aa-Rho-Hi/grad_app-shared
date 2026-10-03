@@ -3,6 +3,25 @@
 {% block title %}{{ professor.name }} — Grad App{% endblock %}
 {% block body %}
 
+{% if leading %}
+<div class="card" style="margin-bottom:14px">
+  <h3 style="margin-top:0">Groups you lead</h3>
+  {% for g in leading %}
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;
+              padding:8px 0;{{ 'border-top:1px solid var(--line)' if not loop.first }}">
+    <a href="{{ url_for('group_home', gid=g.id) }}"><b>{{ g.name }}</b></a>
+    <div class="chips" style="margin:0;align-items:center">
+      {% if g.to_distribute %}<span class="chip d-tbd">{{ g.to_distribute }} to assign</span>{% endif %}
+      {% if g.ready %}<span class="chip d-tbd">{{ g.ready }} ready for your final call</span>{% endif %}
+      {% if g.out %}<span class="chip">{{ g.out }} with reviewers</span>{% endif %}
+      {% if not (g.to_distribute or g.ready or g.out) %}<span class="chip">nothing waiting</span>{% endif %}
+      <a href="{{ url_for('group_home', gid=g.id) }}"><button type="button">Open →</button></a>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <div class="deck-head">
   <div>
     <h3 style="margin:0">{{ professor.name }}</h3>
@@ -52,11 +71,16 @@
   <button type="button" id="btn-undo" class="big">↺ Undo</button>
   <button type="button" id="btn-yes" class="big yes">Accept →</button>
 </div>
+<div class="deck-note">
+  <input type="text" id="deck-note" maxlength="1000"
+         placeholder="Note for your group leader with this call (optional)"
+         aria-label="Note for your group leader">
+</div>
 
 <div id="done" class="card" style="display:none">
   <h3 style="margin-top:0">All done</h3>
-  <p class="muted">You've been through everyone assigned to you. The advisor can see
-     your calls on their dashboard.</p>
+  <p class="muted">You've been through everyone assigned to you. Your group leader
+     sees your calls and makes the final call.</p>
 </div>
 {% endif %}
 
@@ -91,8 +115,8 @@
 </div>
 {% else %}
 <div class="card">
-  <p class="muted">No students have been assigned to you yet. The advisor sends them
-     through after their own first pass.</p>
+  <p class="muted">No students have been assigned to you yet. Your group leader hands
+     them out after the grad office sends them to the group.</p>
 </div>
 {% endif %}
 
@@ -127,6 +151,8 @@
   .stamp.yes{right:18px;color:var(--high);border-color:var(--high);transform:rotate(9deg)}
   .stamp.no{left:18px;color:var(--low);border-color:var(--low);transform:rotate(-9deg)}
   .deck-actions{display:flex;gap:10px;justify-content:center;margin-top:16px}
+  .deck-note{display:flex;justify-content:center;margin-top:10px}
+  .deck-note input{width:min(520px,100%);font-size:14px;padding:9px 12px;border:1px solid var(--line);border-radius:9px}
   button.big{font-size:15px;padding:11px 22px;background:#fff;color:var(--ink);border:1px solid var(--line-strong)}
   button.big:hover{background:#f5f7fc}
   button.big.no{border-color:var(--low-line);color:var(--low)}
@@ -150,8 +176,20 @@
     return fetch("{{ url_for('professor_decide') }}", {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: new URLSearchParams({cas_id: cas, decision: decision, csrf_token: token})
+      body: new URLSearchParams({cas_id: cas, decision: decision, csrf_token: token,
+                                 note: decision === 'undo' ? '' : takeNote()})
+    }).then(r => {
+      if (r.status === 409) window.toast('Your group leader already made the final call on that one', 'bad');
+      return r;
     });
+  }
+  // The note rides along with the next accept/pass, then clears.
+  const noteEl = document.getElementById('deck-note');
+  function takeNote(){
+    if (!noteEl) return '';
+    const v = noteEl.value.trim();
+    noteEl.value = '';
+    return v;
   }
 
   function markOverflow(card){

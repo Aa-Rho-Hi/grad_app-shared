@@ -142,6 +142,7 @@ def main(n=500, scratch="/tmp/load-scratch"):
              ("/applicants", "/applicants"), ("/triage", "/triage"),
              ("/summaries", "/summaries"), ("/triage/shortlist", "/triage/shortlist"),
              ("/professors", "/professors"), ("/prof?as=gratz-paul", "/prof?as=gratz-paul"),
+             ("/groups", "/groups"),
              ("/download/summaries", "/download/summaries"),
              ("/download/status.xlsx", "/download/status.xlsx"),
              ("/review-sheet", "/review-sheet"),

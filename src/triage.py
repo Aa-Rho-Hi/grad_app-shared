@@ -318,8 +318,10 @@ def assign(unified: Dict[str, Any], prof_id: str) -> Dict[str, Any]:
 
 def queues(entries: Sequence[Dict[str, Any]], professors: Sequence[Dict[str, str]]
            ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Each professor with the applicants assigned to them, plus the
-    shortlisted-but-unassigned pile so nobody quietly falls through."""
+    """Each professor with the applicants they're reviewing, plus the
+    shortlisted applicants nobody has yet: not sent to a group, or in a
+    group whose leader hasn't picked a reviewer. Nobody quietly falls through.
+    """
     by_prof: Dict[str, List[Dict[str, Any]]] = {p["id"]: [] for p in professors}
     unassigned: List[Dict[str, Any]] = []
     for entry in shortlisted(entries):

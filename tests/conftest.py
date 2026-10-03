@@ -36,7 +36,8 @@ def _real_config_is_untouched():
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     watched = [os.path.join(root, "config", "professors.yaml"),
-               os.path.join(root, "config", "users.yaml")]
+               os.path.join(root, "config", "users.yaml"),
+               os.path.join(root, "config", "groups.yaml")]
 
     def digest():
         out = {}
@@ -91,4 +92,8 @@ def _isolate_config(tmp_path, monkeypatch):
     professors = tmp_path / "professors.yaml"
     monkeypatch.setattr(triagemod, "PROFESSORS_YAML", str(professors))
     triagemod.save_professors(DEMO_FACULTY, str(professors))
+
+    # Groups start empty per test; a test that wants one creates it.
+    from src import groups as groupsmod
+    monkeypatch.setattr(groupsmod, "GROUPS_YAML", str(tmp_path / "groups.yaml"))
     yield

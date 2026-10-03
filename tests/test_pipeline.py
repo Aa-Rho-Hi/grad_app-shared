@@ -749,6 +749,16 @@ def test_page_has_image_detection():
 # Web layer (Flask) — smoke tests through the test client
 # --------------------------------------------------------------------------
 
+def _make_group(name="Systems", leader="gratz-paul", members=("fan-zhiwen",)):
+    """One review group in the per-test groups file (conftest isolates it)."""
+    from src import groups as groupsmod
+    from src.triage import load_professors
+    groups = groupsmod.add_group(groupsmod.load_groups(), name, leader=leader,
+                                 members=list(members), professors=load_professors())
+    groupsmod.save_groups(groups)
+    return groups[-1]["id"]
+
+
 def _client(tmp_path, monkeypatch):
     from src import app as appmod
     monkeypatch.setattr(appmod, "DATA", str(tmp_path))
@@ -869,9 +879,10 @@ def test_upload_by_fetch_reports_progress_then_finishes(tmp_path, monkeypatch):
 
 
 def test_actions_answer_fetch_without_a_reload(tmp_path, monkeypatch):
-    """Assign, professor edits and clear-all return JSON to a fetch caller and
-    keep redirecting for a plain form post."""
+    """Send-to-group, professor edits and clear-all return JSON to a fetch
+    caller and keep redirecting for a plain form post."""
     appmod, client = _client(tmp_path, monkeypatch)
+    gid = _make_group()
     run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
     from src.store import Store, db_path_for
     store = Store(db_path_for(str(tmp_path)))
@@ -880,13 +891,12 @@ def test_actions_answer_fetch_without_a_reload(tmp_path, monkeypatch):
     client.post("/triage/swipe", data={"cas_id": cas, "direction": "shortlist"})
 
     fetch = {"X-Requested-With": "fetch"}
-    r = client.post("/triage/assign", data={"cas_id": cas, "professor": "gratz-paul"},
-                    headers=fetch)
-    assert r.status_code == 200 and r.get_json()["name"] == "Paul Gratz"
+    r = client.post("/triage/assign", data={"cas_id": cas, "group": gid}, headers=fetch)
+    assert r.status_code == 200 and r.get_json()["name"] == "Systems"
 
     # a plain post still redirects, so the page works with JS off
     assert client.post("/triage/assign",
-                       data={"cas_id": cas, "professor": ""}).status_code == 302
+                       data={"cas_id": cas, "group": ""}).status_code == 302
 
     r = client.post("/reset", headers=fetch)
     assert r.status_code == 200 and r.get_json()["cleared"] == 4
@@ -1778,42 +1788,50 @@ def test_a_professor_only_rules_on_their_own_queue(tmp_path, monkeypatch):
     assert "professor_status" not in Store(db_path_for(str(tmp_path))).get(mine)
 
 
-def test_dashboard_shows_each_professors_verdicts(tmp_path, monkeypatch):
+def test_dashboard_shows_each_groups_pipeline(tmp_path, monkeypatch):
     appmod, client = _client(tmp_path, monkeypatch)
+    gid = _make_group()
     run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
     from src.store import Store, db_path_for
     store = Store(db_path_for(str(tmp_path)))
     ids = [e["cas_id"] for e in store.index()]
-    store.update(ids[0], lambda u: {**u, "triage": "shortlist",
-                                    "assigned_to": "gratz-paul",
-                                    "professor_status": "accept"})
-    store.update(ids[1], lambda u: {**u, "triage": "shortlist",
-                                    "assigned_to": "gratz-paul"})
-    store.update(ids[2], lambda u: {**u, "triage": "shortlist"})   # unassigned
+    store.update(ids[0], lambda u: {**u, "triage": "shortlist", "group": gid,
+                                    "assigned_to": "fan-zhiwen",
+                                    "professor_status": "accept",
+                                    "final_status": "accept"})
+    store.update(ids[1], lambda u: {**u, "triage": "shortlist", "group": gid,
+                                    "assigned_to": "fan-zhiwen"})
+    store.update(ids[2], lambda u: {**u, "triage": "shortlist"})   # not sent
 
     page = client.get("/").get_data(as_text=True)
-    assert "Paul Gratz" in page
-    assert "1 accepted" in page and "1 to review" in page
-    assert "Not assigned yet" in page
+    assert "Systems" in page and "Paul Gratz" in page         # group and its leader
+    assert "1 accepted" in page and "1 with reviewers" in page
+    assert "Not sent to a group yet" in page
 
 
 def test_status_report_carries_every_verdict(tmp_path, monkeypatch):
-    """One row per applicant with all three verdicts and the professor's name —
-    the thing an advisor mails round."""
+    """One row per applicant with every call on it, and who made it: the
+    thing the grad office mails round."""
     import io
     import openpyxl
+    from src.groups import load_groups
     from src.status_report import COLUMNS, rows_for, summarize
     from src.store import Store, db_path_for
     appmod, client = _client(tmp_path, monkeypatch)
+    gid = _make_group()
     run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
     store = Store(db_path_for(str(tmp_path)))
     ids = [e["cas_id"] for e in store.index()]
     store.update(ids[0], lambda u: {**u, "review_status": "tbd", "triage": "shortlist",
-                                    "assigned_to": "gratz-paul",
+                                    "group": gid, "assigned_to": "fan-zhiwen",
                                     "professor_status": "accept",
-                                    "professor_decided_at": "2027-01-05T10:00:00+00:00"})
+                                    "professor_decided_at": "2027-01-05T10:00:00+00:00",
+                                    "professor_note": "=strong fit",
+                                    "final_status": "reject",
+                                    "final_decided_at": "2027-01-07T10:00:00+00:00",
+                                    "final_note": "no funding"})
     store.update(ids[1], lambda u: {**u, "review_status": "tbd", "triage": "shortlist",
-                                    "assigned_to": "gratz-paul"})
+                                    "group": gid, "assigned_to": "fan-zhiwen"})
     store.update(ids[2], lambda u: {**u, "review_status": "reject", "triage": "reject"})
 
     r = client.get("/download/status.xlsx")
@@ -1828,30 +1846,33 @@ def test_status_report_carries_every_verdict(tmp_path, monkeypatch):
     by_id = {row[header.index("cas_id")]: row
              for row in ws.iter_rows(min_row=2, values_only=True)}
 
-    accepted = by_id[ids[0]]
-    assert accepted[header.index("professor")] == "Paul Gratz"
-    assert accepted[header.index("professor_status")] == "accept"
-    assert accepted[header.index("professor_decided")] == "2027-01-05"
-    assert accepted[header.index("advisor_triage")] == "shortlist"
+    done = by_id[ids[0]]
+    assert done[header.index("group")] == "Systems"
+    assert done[header.index("group_leader")] == "Paul Gratz"
+    assert done[header.index("reviewer")] == "Zhiwen Fan"
+    assert done[header.index("first_call")] == "accept"
+    assert done[header.index("first_call_date")] == "2027-01-05"
+    assert done[header.index("first_call_note")] == "=strong fit"   # text, not a formula
+    assert done[header.index("final_call")] == "reject"
+    assert done[header.index("final_call_note")] == "no funding"
 
-    # in a queue but not yet ruled on
-    assert by_id[ids[1]][header.index("professor_status")] == "waiting"
-    # nobody's queue: no professor, and not "waiting" on one either.
-    # (An empty cell reads back as None from openpyxl — that's Excel, not us.)
+    # with a reviewer, nothing decided yet
+    waiting = by_id[ids[1]]
+    assert waiting[header.index("first_call")] == "waiting"
+    assert not waiting[header.index("final_call")]
+    # never sent anywhere: no group, no calls (an empty cell reads back as None)
     rejected = by_id[ids[2]]
-    assert not rejected[header.index("professor")]
-    assert not rejected[header.index("professor_status")]
+    assert not rejected[header.index("group")] and not rejected[header.index("first_call")]
     assert rejected[header.index("status")] == "reject"
 
-    board = wb["By professor"]
-    tallies = {row[0]: row[1:] for row in board.iter_rows(min_row=2, values_only=True)}
-    assert tallies["Paul Gratz"] == (2, 1, 0, 1)          # assigned, acc, rej, waiting
-    assert tallies["— not assigned —"][0] == len(ids) - 2
+    tallies = {row[0]: row[1:] for row in wb["By group"].iter_rows(min_row=2, values_only=True)}
+    # leader, sent, to assign, with reviewers, awaiting final, accepted, rejected
+    assert tallies["Systems"] == ("Paul Gratz", 2, 0, 1, 0, 0, 1)
 
-    # the helpers work without openpyxl in the way, and sort by professor
-    rows = rows_for(store.index(), appmod.load_professors())
-    assert rows[0]["professor"] == "Paul Gratz"
-    assert summarize(rows, appmod.load_professors())[-1]["professor"] == "— not assigned —"
+    # the helpers work without openpyxl in the way, and sort by group
+    rows = rows_for(store.index(), appmod.load_professors(), load_groups())
+    assert rows[0]["group"] == "Systems"
+    assert summarize(store.index(), load_groups())[-1]["group"] == "— not sent to a group —"
 
 
 def _bulk_roster(path, n):
@@ -1984,11 +2005,13 @@ def test_professor_edits_reject_bad_input():
 
 
 def test_deleting_a_professor_frees_their_queue(tmp_path, monkeypatch):
+    from src import groups as groupsmod
     from src import triage as triagemod
     appmod, client = _client(tmp_path, monkeypatch)
     path = str(tmp_path / "professors.yaml")
     monkeypatch.setattr(triagemod, "PROFESSORS_YAML", path)
     triagemod.save_professors(triagemod.add_professor([], "Paul Gratz"), path)
+    gid = _make_group(leader="paul-gratz", members=("paul-gratz",))
 
     run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
     from src.store import Store, db_path_for
@@ -1996,21 +2019,25 @@ def test_deleting_a_professor_frees_their_queue(tmp_path, monkeypatch):
     cas = store.index()[0]["cas_id"]
     store.update(cas, lambda u: {**u, "review_status": "tbd"})
     client.post("/triage/swipe", data={"cas_id": cas, "direction": "shortlist"})
-    client.post("/triage/assign", data={"cas_id": cas, "professor": "paul-gratz"})
+    client.post("/triage/assign", data={"cas_id": cas, "group": gid})
+    client.post(f"/group/{gid}/assign", data={"cas_id": cas, "reviewer": "paul-gratz"})
     assert store.get(cas)["assigned_to"] == "paul-gratz"
 
     client.post("/professors/delete", data={"id": "paul-gratz"}, follow_redirects=True)
     assert triagemod.load_professors(path) == []
-    # The applicant is still shortlisted — just nobody's, rather than pointing
-    # at a professor who no longer exists.
-    assert store.get(cas)["assigned_to"] == ""
-    assert store.get(cas)["triage"] == "shortlist"
+    # Still in the group, back with its leader to reassign, rather than
+    # pointing at a professor who no longer exists. And out of the group too.
+    rec = store.get(cas)
+    assert "assigned_to" not in rec and rec["group"] == gid and rec["triage"] == "shortlist"
+    g = groupsmod.load_groups()[0]
+    assert g["leader"] == "" and g["members"] == []
     assert "not assigned yet" in client.get("/professors").get_data(as_text=True).lower()
 
 
 def test_triage_routes_round_trip(tmp_path, monkeypatch):
-    """Swipe right, assign a professor, see them in that professor's queue."""
+    """Swipe right, send to a group, see them in that group."""
     appmod, client = _client(tmp_path, monkeypatch)
+    gid = _make_group()
     run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
     from src.store import Store, db_path_for
     store = Store(db_path_for(str(tmp_path)))
@@ -2032,11 +2059,11 @@ def test_triage_routes_round_trip(tmp_path, monkeypatch):
     assert client.post("/triage/swipe",
                        data={"cas_id": "no-such-id", "direction": "reject"}).status_code == 404
 
-    client.post("/triage/assign", data={"cas_id": ids[0], "professor": "gratz-paul"})
-    queue_page = client.get("/professors").get_data(as_text=True)
-    assert "Paul Gratz" in queue_page and "1 in queue" in queue_page
+    client.post("/triage/assign", data={"cas_id": ids[0], "group": gid})
+    groups_page = client.get("/groups").get_data(as_text=True)
+    assert "Systems" in groups_page and "1 sent" in groups_page
     assert client.post("/triage/assign",
-                       data={"cas_id": ids[0], "professor": "ghost"}).status_code == 400
+                       data={"cas_id": ids[0], "group": "ghost"}).status_code == 400
 
 
 def test_the_summaries_view_and_download_follow_the_swipe(tmp_path, monkeypatch):
@@ -2066,10 +2093,12 @@ def test_the_summaries_view_and_download_follow_the_swipe(tmp_path, monkeypatch)
     assert md.count("\n## ") == 2                  # the two swiped, nobody else
 
 
-def test_a_right_swipe_can_name_the_professor(tmp_path, monkeypatch):
+def test_a_right_swipe_can_name_the_group(tmp_path, monkeypatch):
     """Picking on the card saves a second pass through the shortlist; the
     shortlist can still change it afterwards."""
     appmod, client = _client(tmp_path, monkeypatch)
+    gid = _make_group()
+    other = _make_group("Power", leader="narayanan-krishna", members=("duffield-nick",))
     run(CSV, str(tmp_path), os.path.join(ROOT, "config", "csv_field_map.yaml"))
     from src.store import Store, db_path_for
     store = Store(db_path_for(str(tmp_path)))
@@ -2078,24 +2107,24 @@ def test_a_right_swipe_can_name_the_professor(tmp_path, monkeypatch):
         store.update(sid, lambda u: {**u, "review_status": "tbd"})
 
     # the deck offers the picker
-    assert 'class="prof-pick"' in client.get("/triage").get_data(as_text=True)
+    assert 'class="group-pick"' in client.get("/triage").get_data(as_text=True)
 
     r = client.post("/triage/swipe", data={"cas_id": ids[0], "direction": "shortlist",
-                                           "professor": "gratz-paul"})
-    assert r.get_json()["assigned_to"] == "gratz-paul"
+                                           "group": gid})
+    assert r.get_json()["group"] == gid
 
-    # blank is fine — they land on the shortlist unassigned (no field written)
+    # blank is fine — they land on the shortlist not sent (no field written)
     client.post("/triage/swipe", data={"cas_id": ids[1], "direction": "shortlist",
-                                       "professor": ""})
-    assert store.get(ids[1]).get("assigned_to", "") == ""
+                                       "group": ""})
+    assert store.get(ids[1]).get("group", "") == ""
 
-    # an invented professor is refused rather than silently stored
+    # an invented group is refused rather than silently stored
     assert client.post("/triage/swipe", data={"cas_id": ids[2], "direction": "shortlist",
-                                              "professor": "ghost"}).status_code == 400
+                                              "group": "ghost"}).status_code == 400
     # changing it later, from the shortlist
-    client.post("/triage/assign", data={"cas_id": ids[0], "professor": "fan-zhiwen"})
-    assert store.get(ids[0])["assigned_to"] == "fan-zhiwen"
-    assert 'name="professor"' in client.get("/triage/shortlist").get_data(as_text=True)
+    client.post("/triage/assign", data={"cas_id": ids[0], "group": other})
+    assert store.get(ids[0])["group"] == other
+    assert 'name="group"' in client.get("/triage/shortlist").get_data(as_text=True)
 
 
 def test_review_sheet_keeps_every_original_column(tmp_path):

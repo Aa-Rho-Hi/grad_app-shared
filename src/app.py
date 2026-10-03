@@ -61,11 +61,18 @@ from .documents import DOC_TYPES, infer_cas_id, ingest_document
 from .ingest_zip import ingest_packet_folder, ingest_zip
 from .review import degree_coverage, write_review_sheet
 from .triage import (PROF_DECISIONS, SWIPES, ProfessorError, add_professor,
-                     apply_professor_decision, apply_swipe, assign, assigned_to,
+                     apply_swipe, assigned_to,
                      condense_card, deck, decided, load_professors,
                      professor_by_id, professor_deck, queues, remove_professor,
                      save_professors, shortlisted, update_professor)
 from .status_report import write_status_report
+from .groups import (ACCEPT as G_ACCEPT, CALLS as G_CALLS, GroupError,
+                     READY_FOR_FINAL, STAGE_LABELS, TO_DISTRIBUTE, UNDO as G_UNDO,
+                     WITH_REVIEWER, add_group, apply_final_call, apply_first_call,
+                     assign_reviewer, board as group_board, buckets, drop_professor,
+                     group_by_id, in_group, led_by, load_groups, memberships,
+                     remove_group, reviewers, save_groups, send_to_group, split_evenly,
+                     stage as group_stage, suggest_group, update_group)
 from .prescreen_report import FILES as PRESCREEN_FILES, counts as prescreen_counts, \
     write_all as write_prescreen, zip_bytes
 from .screening import (ADMIT, REVIEW, SEPARATE_FILES, TRACK_LABELS, courses_source,
@@ -670,21 +677,18 @@ def index():
     if user and user["role"] == PROFESSOR:
         return redirect(url_for("professor_home"))
     entries = _summaries()
-    professors = load_professors()
-    board, unassigned = queues(entries, professors)
-    for prof in board:
-        prof["assigned"] = assigned_to(entries, prof["id"])
-        prof["waiting"] = [e for e in prof["assigned"] if not e.get("professor_status")]
-        prof["accepted"] = [e for e in prof["assigned"]
-                            if e.get("professor_status") == "accept"]
-        prof["rejected"] = [e for e in prof["assigned"]
-                            if e.get("professor_status") == "reject"]
+    groups = load_groups()
+    names = {p["id"]: p["name"] for p in load_professors()}
+    gboard, orphans = group_board(entries, groups)
+    not_sent = [e for e in shortlisted(entries) if not e.get("group")]
     return render_template(
-        "dashboard.html", professors=board, unassigned=unassigned,
+        "dashboard.html", groups=gboard, orphans=orphans, not_sent=not_sent,
+        names=names, stage_labels=STAGE_LABELS,
         total=len(entries), tbd=len(deck(entries)),
         reviewed=len(decided(entries)),
         shortlist=len(shortlisted(entries)),
-        answered=sum(1 for e in entries if e.get("professor_status")))
+        in_groups=sum(1 for e in entries if e.get("group")),
+        finals=sum(1 for e in entries if e.get("final_status")))
 
 
 @app.route("/step/1")
@@ -710,21 +714,54 @@ def _my_professor_id() -> str:
     return request.args.get("as") or ""
 
 
+def _leads(group: Dict[str, Any]) -> bool:
+    """May the current session act as this group's leader? With no logins
+    there's one operator who does everything; with logins, only the professor
+    named as the group's leader. The grad office can look but not decide: the
+    final call is the leader's."""
+    user = current_user()
+    if not user:
+        return True
+    return user["role"] == PROFESSOR and bool(group.get("leader")) \
+        and user.get("professor") == group["leader"]
+
+
+def _may_view(unified: Dict[str, Any]) -> bool:
+    """Who can open an applicant's page: the grad office, the reviewer they
+    were assigned to, and the leader of the group they were sent to."""
+    user = current_user()
+    if not user or user["role"] == ADVISOR:
+        return True
+    me = user.get("professor") or ""
+    if not me:
+        return False
+    if unified.get("assigned_to") == me:
+        return True
+    group = group_by_id(unified.get("group") or "")
+    return bool(group and group.get("leader") == me)
+
+
 @app.route("/prof")
 def professor_home():
-    """A professor's own deck: the students the advisor handed them."""
+    """A professor's own deck: the students their group leader handed them,
+    plus a way into any group they lead."""
     prof_id = _my_professor_id()
     prof = professor_by_id(prof_id)
     if not prof:
         # No account and no ?as= — offer the list rather than a blank page.
         return render_template("prof_pick.html", professors=load_professors())
     entries = _summaries()
+    leading = []
+    for g in led_by(prof_id, load_groups()):
+        b = buckets(in_group(entries, g["id"]))
+        leading.append(dict(g, to_distribute=len(b[TO_DISTRIBUTE]),
+                            ready=len(b[READY_FOR_FINAL]), out=len(b[WITH_REVIEWER])))
     mine = assigned_to(entries, prof_id)
     waiting = professor_deck(entries, prof_id)
     cards = [dict(e, card_text=condense_card(e.get("summary_text", "")))
              for e in waiting[:DECK_BATCH]]
     shown, page, pages = _page_of(mine, request.args.get("page", 1, type=int))
-    return render_template("prof_deck.html", professor=prof, cards=cards,
+    return render_template("prof_deck.html", professor=prof, cards=cards, leading=leading,
                            mine=shown, queue_total=len(mine), page=page, pages=pages,
                            remaining=len(waiting) - len(cards),
                            accepted=[e for e in mine if e.get("professor_status") == "accept"],
@@ -746,9 +783,15 @@ def professor_decide():
     # session, so a copied link to someone else's student changes nothing.
     if entry.get("assigned_to") != prof_id:
         abort(403, description="That applicant isn't in your queue.")
-    updated = _store().update(cas_id,
-                              lambda u: apply_professor_decision(u, decision),
-                              create=False)
+    if entry.get("final_status"):
+        abort(409, description="Your group leader has already made the final call.")
+    note = request.form.get("note", "")
+    try:
+        updated = _store().update(cas_id,
+                                  lambda u: apply_first_call(u, decision, note),
+                                  create=False)
+    except GroupError as exc:
+        abort(409, description=str(exc))
     return {"cas_id": cas_id, "professor_status": updated.get("professor_status", "")}
 
 
@@ -839,7 +882,7 @@ def download_status():
         flash("No applicants yet — upload a file first.")
         return redirect(url_for("index"))
     path = os.path.join(DATA, "reports", "applicant_status.xlsx")
-    write_status_report(entries, load_professors(), path)
+    write_status_report(entries, load_professors(), path, load_groups())
     _blobs().publish(path)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return _serve(path, f"applicant_status_{stamp}.xlsx")
@@ -1453,7 +1496,7 @@ def triage():
     # one — the rest arrive as you work through them.
     cards = [dict(e, card_text=condense_card(e.get("summary_text", "")))
              for e in waiting[:DECK_BATCH]]
-    return render_template("triage.html", cards=cards, professors=load_professors(),
+    return render_template("triage.html", cards=cards, groups=load_groups(),
                            shortlist_count=len(shortlisted(entries)),
                            remaining=len(waiting) - len(cards),
                            total_tbd=sum(1 for e in entries
@@ -1470,7 +1513,7 @@ def triage_cards():
     cards = [dict(e, card_text=condense_card(e.get("summary_text", "")))
              for e in nxt]
     return {"html": render_template("_deck_cards.html", cards=cards,
-                                    professors=load_professors()),
+                                    groups=load_groups()),
             "remaining": max(0, len(waiting) - len(seen) - len(cards))}
 
 
@@ -1478,23 +1521,25 @@ def triage_cards():
 @limiter.limit("600/hour")
 @role_required(ADVISOR)
 def triage_swipe():
-    """A swipe, optionally naming the professor to hand them to.
+    """A swipe, optionally naming the group to send them to.
 
-    Picking the professor on the card saves a second pass through the
-    shortlist; leaving it blank is fine, they just land there unassigned.
+    Picking the group on the card saves a second pass through the shortlist;
+    leaving it blank is fine, they just land there not yet sent.
     """
     cas_id = request.form.get("cas_id", "")
     direction = request.form.get("direction", "")
-    prof_id = request.form.get("professor", "")
+    gid = request.form.get("group", "")
     if direction not in SWIPES:
         abort(400, description="Unknown swipe direction.")
-    if prof_id and not professor_by_id(prof_id):
-        abort(400, description="Unknown professor.")
+    if gid and not group_by_id(gid):
+        abort(400, description="Unknown group.")
 
     def _apply(unified):
         apply_swipe(unified, direction)
-        if direction == "shortlist" and prof_id:
-            assign(unified, prof_id)
+        if direction == "shortlist" and gid:
+            send_to_group(unified, gid)
+        if direction == "undo":
+            send_to_group(unified, "")
         return unified
 
     updated = _store().update(cas_id, _apply, create=False)
@@ -1502,19 +1547,20 @@ def triage_swipe():
         abort(404)
     return {"cas_id": cas_id, "triage": updated.get("triage", ""),
             "review_status": updated.get("review_status", ""),
-            "assigned_to": updated.get("assigned_to", "")}
+            "group": updated.get("group", "")}
 
 
 @app.route("/triage/shortlist")
 @role_required(ADVISOR)
 def triage_shortlist():
-    """What survived the swipe, and which professor each one goes to."""
-    professors = load_professors()
+    """What survived the swipe, and which group each one goes to."""
+    groups = load_groups()
     entries = shortlisted(_summaries())
     for e in entries:
-        e["professor"] = professor_by_id(e.get("assigned_to", ""), professors)
-    return render_template("shortlist.html", applicants=entries,
-                           professors=professors,
+        e["group_obj"] = group_by_id(e.get("group", ""), groups)
+        e["suggested"] = group_by_id(suggest_group(e, groups), groups)
+        e["stage_label"] = STAGE_LABELS[group_stage(e)]
+    return render_template("shortlist.html", applicants=entries, groups=groups,
                            remaining=len(deck(_summaries())))
 
 
@@ -1522,28 +1568,251 @@ def triage_shortlist():
 @limiter.limit("600/hour")
 @role_required(ADVISOR)
 def triage_assign():
+    """Send a shortlisted applicant to a group (blank takes them back out).
+    Moving them to a different group starts that group's review over."""
     cas_id = request.form.get("cas_id", "")
-    prof_id = request.form.get("professor", "")
-    professors = load_professors()
-    if prof_id and not professor_by_id(prof_id, professors):
-        abort(400, description="Unknown professor.")
-    updated = _store().update(cas_id, lambda u: assign(u, prof_id), create=False)
+    gid = request.form.get("group", "")
+    groups = load_groups()
+    if gid and not group_by_id(gid, groups):
+        abort(400, description="Unknown group.")
+    updated = _store().update(cas_id, lambda u: send_to_group(u, gid), create=False)
     if updated is None:
         abort(404)
     who = updated.get("identity", {}).get("full_name", cas_id)
-    to = (professor_by_id(prof_id, professors) or {}).get("name", "nobody")
+    to = (group_by_id(gid, groups) or {}).get("name", "no group")
     message = f"{who} → {to}"
     if _wants_json():
-        return {"message": message, "cas_id": cas_id, "professor": prof_id, "name": to}
+        return {"message": message, "cas_id": cas_id, "group": gid, "name": to}
     flash(message)
     return redirect(url_for("triage_shortlist"))
+
+
+# ----------------------------------------------------------------- groups --
+
+@app.route("/groups")
+@role_required(ADVISOR)
+def groups_view():
+    """Every group's pipeline, and the groups themselves."""
+    entries = _summaries()
+    professors = load_professors()
+    gboard, orphans = group_board(entries, load_groups())
+    return render_template("groups.html", groups=gboard, orphans=orphans,
+                           professors=professors,
+                           names={p["id"]: p["name"] for p in professors},
+                           not_sent=[e for e in shortlisted(entries) if not e.get("group")],
+                           stage_labels=STAGE_LABELS,
+                           editing=request.args.get("edit") == "1")
+
+
+def _group_saved(groups, message: str):
+    try:
+        save_groups(groups)
+    except OSError as exc:
+        app.logger.exception("Could not write the group list")
+        message = f"Could not save the groups: {exc}"
+        if _wants_json():
+            return {"message": message, "error": True}, 500
+    if _wants_json():
+        return {"message": message}
+    flash(message)
+    return redirect(url_for("groups_view", edit=1))
+
+
+def _group_error(exc):
+    if _wants_json():
+        return {"message": str(exc), "error": True}, 400
+    flash(str(exc))
+    return redirect(url_for("groups_view", edit=1))
+
+
+@app.route("/groups/add", methods=["POST"])
+@limiter.limit("120/hour")
+@role_required(ADVISOR)
+def groups_add():
+    name = request.form.get("name", "")
+    try:
+        groups = add_group(load_groups(), name, leader=request.form.get("leader", ""),
+                           members=request.form.getlist("members"),
+                           areas=request.form.get("areas", ""),
+                           professors=load_professors())
+    except GroupError as exc:
+        return _group_error(exc)
+    return _group_saved(groups, f"Added {name.strip()}.")
+
+
+@app.route("/groups/update", methods=["POST"])
+@limiter.limit("120/hour")
+@role_required(ADVISOR)
+def groups_update():
+    gid = request.form.get("id", "")
+    try:
+        groups = update_group(load_groups(), gid, name=request.form.get("name", ""),
+                              leader=request.form.get("leader", ""),
+                              members=request.form.getlist("members"),
+                              areas=request.form.get("areas", ""),
+                              professors=load_professors())
+    except GroupError as exc:
+        return _group_error(exc)
+    # Someone taken out of the group can't keep reviewing for it: their
+    # open (not yet final) applicants go back to the leader to reassign.
+    group = group_by_id(gid, groups)
+    store = _store()
+    freed = 0
+    for e in in_group(store.index(), gid):
+        who = e.get("assigned_to")
+        if who and who not in reviewers(group) and not e.get("final_status"):
+            store.update(e["cas_id"], lambda u: assign_reviewer(u, "", group), create=False)
+            freed += 1
+    note = "Saved." + (f" {freed} applicant(s) went back to the leader to reassign." if freed else "")
+    return _group_saved(groups, note)
+
+
+@app.route("/groups/delete", methods=["POST"])
+@limiter.limit("120/hour")
+@role_required(ADVISOR)
+def groups_delete():
+    """Remove a group. Anyone sent to it goes back to the shortlist, not sent,
+    so no record points at a group that no longer exists."""
+    gid = request.form.get("id", "")
+    groups = load_groups()
+    gone = group_by_id(gid, groups)
+    try:
+        remaining = remove_group(groups, gid)
+    except GroupError as exc:
+        return _group_error(exc)
+    store = _store()
+    freed = [e["cas_id"] for e in in_group(store.index(), gid)]
+    for cas_id in freed:
+        store.update(cas_id, lambda u: send_to_group(u, ""), create=False)
+    note = f"Removed {(gone or {}).get('name', gid)}."
+    if freed:
+        note += f" {len(freed)} applicant(s) went back to the shortlist, not sent to a group."
+    return _group_saved(remaining, note)
+
+
+def _group_or_404(gid: str) -> Dict[str, Any]:
+    group = group_by_id(gid)
+    if not group:
+        abort(404)
+    user = current_user()
+    if user and user["role"] != ADVISOR and not _leads(group):
+        abort(403, description="That page is for the group's leader.")
+    return group
+
+
+@app.route("/group/<gid>")
+def group_home(gid: str):
+    """A group leader's workspace: hand applicants to members, see their first
+    calls, make the final call. The grad office can open it to look."""
+    group = _group_or_404(gid)
+    entries = in_group(_summaries(), gid)
+    professors = load_professors()
+    names = {p["id"]: p["name"] for p in professors}
+    for e in entries:
+        e["reviewer_name"] = names.get(e.get("assigned_to", ""), e.get("assigned_to", ""))
+    b = buckets(entries)
+    for key in b:
+        b[key].sort(key=lambda e: str(e.get("name", "")).lower())
+    pool = [{"id": pid, "name": names.get(pid, pid)} for pid in reviewers(group)]
+    load = {p["id"]: sum(1 for e in entries if e.get("assigned_to") == p["id"]
+                         and not e.get("final_status")) for p in pool}
+    return render_template("group.html", group=group, stages=b, pool=pool, load=load,
+                           leader_name=names.get(group.get("leader", ""), ""),
+                           can_act=_leads(group), stage_labels=STAGE_LABELS,
+                           total=len(entries))
+
+
+@app.route("/group/<gid>/assign", methods=["POST"])
+@limiter.limit("600/hour")
+def group_assign(gid: str):
+    group = _group_or_404(gid)
+    if not _leads(group):
+        abort(403, description="Only the group's leader assigns reviewers.")
+    cas_id = request.form.get("cas_id", "")
+    prof_id = request.form.get("reviewer", "")
+    try:
+        updated = _store().update(cas_id, lambda u: assign_reviewer(u, prof_id, group),
+                                  create=False)
+    except GroupError as exc:
+        if _wants_json():
+            return {"message": str(exc), "error": True}, 409
+        flash(str(exc))
+        return redirect(url_for("group_home", gid=gid))
+    if updated is None:
+        abort(404)
+    to = (professor_by_id(prof_id) or {}).get("name", "nobody")
+    message = f"{updated.get('identity', {}).get('full_name', cas_id)} → {to}"
+    if _wants_json():
+        return {"message": message, "cas_id": cas_id, "reviewer": prof_id, "name": to}
+    flash(message)
+    return redirect(url_for("group_home", gid=gid))
+
+
+@app.route("/group/<gid>/split", methods=["POST"])
+@limiter.limit("60/hour")
+def group_split(gid: str):
+    """Hand every unassigned applicant in the group to a member, evenly."""
+    group = _group_or_404(gid)
+    if not _leads(group):
+        abort(403, description="Only the group's leader assigns reviewers.")
+    store = _store()
+    plan = split_evenly(store.index(), group, load_professors())
+    for cas_id, prof_id in plan:
+        store.update(cas_id, lambda u, p=prof_id: assign_reviewer(u, p, group), create=False)
+    if not plan:
+        flash("Nothing to hand out." if reviewers(group)
+              else "Add members to this group first.")
+    else:
+        flash(f"Handed out {len(plan)} applicant(s) across the group.")
+    return redirect(url_for("group_home", gid=gid))
+
+
+@app.route("/group/<gid>/final", methods=["POST"])
+@limiter.limit("600/hour")
+def group_final(gid: str):
+    """The leader's final call (accept / reject / undo), with an optional note."""
+    group = _group_or_404(gid)
+    if not _leads(group):
+        abort(403, description="Only the group's leader makes the final call.")
+    cas_id = request.form.get("cas_id", "")
+    decision = request.form.get("decision", "")
+    if decision not in G_CALLS + (G_UNDO,):
+        abort(400, description="Unknown decision.")
+    user = current_user()
+    by = user["username"] if user else ""
+    try:
+        updated = _store().update(
+            cas_id, lambda u: apply_final_call(u, decision, leader_id=group.get("leader", ""),
+                                               by=by, note=request.form.get("note", ""),
+                                               group=group),
+            create=False)
+    except GroupError as exc:
+        if _wants_json():
+            return {"message": str(exc), "error": True}, 409
+        flash(str(exc))
+        return redirect(url_for("group_home", gid=gid))
+    if updated is None:
+        abort(404)
+    who = updated.get("identity", {}).get("full_name", cas_id)
+    message = (f"Final call undone for {who}." if decision == G_UNDO else
+               f"{who}: final call {'accept' if decision == G_ACCEPT else 'reject'}.")
+    if _wants_json():
+        return {"message": message, "cas_id": cas_id,
+                "final_status": updated.get("final_status", "")}
+    flash(message)
+    return redirect(url_for("group_home", gid=gid))
 
 
 @app.route("/professors")
 @role_required(ADVISOR)
 def professors_view():
-    """Each professor's review queue, and the list itself."""
+    """Each faculty member's reviewing load (handed to them by their group
+    leader), their groups, and the list itself."""
+    groups = load_groups()
     profs, unassigned = queues(_summaries(), load_professors())
+    for p in profs:
+        p["groups"] = memberships(p["id"], groups)
+        p["leads"] = led_by(p["id"], groups)
     return render_template("professors.html", professors=profs, unassigned=unassigned,
                            editing=request.args.get("edit") == "1")
 
@@ -1614,15 +1883,27 @@ def professors_delete():
         return _professor_error(exc)
 
     store = _store()
-    freed = [e["cas_id"] for e in store.index() if e.get("assigned_to") == prof_id]
+    freed = [e["cas_id"] for e in store.index()
+             if e.get("assigned_to") == prof_id and not e.get("final_status")]
     for cas_id in freed:
-        store.update(cas_id, lambda u: assign(u, ""), create=False)
+        # Back to their group leader to reassign (still in the group), and
+        # the departed reviewer's unfinished first call goes with them.
+        store.update(cas_id, _unassign, create=False)
+    groups = load_groups()
+    if any(prof_id in reviewers(g) for g in groups):
+        save_groups(drop_professor(groups, prof_id))
 
     note = f"Removed {(gone or {}).get('name', prof_id)}."
     if freed:
-        note += (f" {len(freed)} applicant(s) went back to the shortlist, "
-                 "unassigned.")
+        note += (f" {len(freed)} applicant(s) went back to their group leader "
+                 "to reassign.")
     return _save_professors(remaining, note)
+
+
+def _unassign(unified: Dict[str, Any]) -> Dict[str, Any]:
+    for key in ("assigned_to", "professor_status", "professor_decided_at", "professor_note"):
+        unified.pop(key, None)
+    return unified
 
 
 @app.route("/student/<cas_id>")
@@ -1630,12 +1911,17 @@ def student(cas_id: str):
     unified = _student_record(cas_id)
     if not unified:
         abort(404)
+    if not _may_view(unified):
+        abort(403, description="That applicant isn't assigned to you or your group.")
     rec = summary_view(unified)                 # flattened view for the template
     summary = {"summary_text": unified.get("summary", "")}
     return render_template("student.html", rec=rec, summary=summary,
                            unified=unified, sources_present=sources_present(unified),
                            screening=prescreen_evaluate(unified),
-                           profile=prescreen_profile(unified), ADMIT=ADMIT)
+                           profile=prescreen_profile(unified), ADMIT=ADMIT,
+                           group=group_by_id(unified.get("group") or ""),
+                           reviewer=professor_by_id(unified.get("assigned_to") or ""),
+                           stage_label=STAGE_LABELS[group_stage(unified)])
 
 
 if __name__ == "__main__":

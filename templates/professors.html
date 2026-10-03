@@ -1,18 +1,21 @@
 {% extends "base.html" %}
-{% block title %}Professor queues — Grad App{% endblock %}
+{% block title %}Faculty — Grad App{% endblock %}
 {% block body %}
 
 <p class="back"><a href="{{ url_for('applicants') }}">← All applicants</a>
    &nbsp;·&nbsp; <a href="{{ url_for('triage') }}">Triage deck</a>
-   &nbsp;·&nbsp; <a href="{{ url_for('triage_shortlist') }}">Shortlist</a></p>
+   &nbsp;·&nbsp; <a href="{{ url_for('triage_shortlist') }}">Shortlist</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('groups_view') }}">Groups</a></p>
 
 <div class="card">
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
-    <h3 style="margin:0">Professor queues</h3>
+    <h3 style="margin:0">Faculty</h3>
     <a href="{{ url_for('professors_view', edit=None if editing else 1) }}"><button type="button">
-      {{ '← Back to queues' if editing else '✎ Edit professors' }}</button></a>
+      {{ '← Back to faculty' if editing else '✎ Edit faculty list' }}</button></a>
   </div>
-  <p class="muted" style="margin:8px 0 0">Shortlisted applicants waiting on each faculty reviewer.</p>
+  <p class="muted" style="margin:8px 0 0">Who's reviewing what. Group leaders hand applicants
+     to their members; this is each person's load, across every group they're in.
+     Groups are set up on the <a href="{{ url_for('groups_view') }}">Groups page</a>.</p>
   <div class="filters" id="qfilters">
     <input type="search" placeholder="Search a professor or an applicant…" aria-label="Search queues">
     <div class="seg">
@@ -39,7 +42,8 @@
 <div class="card">
   <h3 style="margin-top:0">Edit or remove</h3>
   <p class="muted">Renaming is safe — assignments follow the professor, not the name.
-     Removing someone sends anyone in their queue back to the shortlist, unassigned.</p>
+     Removing someone takes them out of every group, and their unfinished reviews go back
+     to the group leader to reassign.</p>
   {% for p in professors %}
   <form action="{{ url_for('professors_update') }}" method="post" class="pform"
         style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px">
@@ -50,7 +54,7 @@
     <input type="text" name="areas" value="{{ p.areas|join(', ') }}" placeholder="Areas">
     <button type="submit">Save</button>
     <button type="submit" form="del-{{ p.id }}" class="danger"
-            onclick="return confirm({{ ('Remove ' ~ p.name ~ '? ' ~ (p.applicants|length) ~ ' applicant(s) in their queue go back to the shortlist, unassigned.')|tojson }})">Delete</button>
+            onclick="return confirm({{ ('Remove ' ~ p.name ~ '? ' ~ (p.applicants|length) ~ ' applicant(s) they are reviewing go back to their group leader.')|tojson }})">Delete</button>
     <span class="muted" style="font-size:12px">id: {{ p.id }}</span>
   </form>
   <form id="del-{{ p.id }}" action="{{ url_for('professors_delete') }}" method="post" style="display:none">
@@ -66,8 +70,9 @@
 {% if unassigned %}
 <div class="card">
   <h3 style="margin-top:0">Not assigned yet <span class="chip w">{{ unassigned|length }}</span></h3>
-  <p class="muted">Shortlisted but not in anyone's queue —
-     <a href="{{ url_for('triage_shortlist') }}">assign them</a>.</p>
+  <p class="muted">Shortlisted but nobody is reviewing them yet: either not sent to a group
+     (<a href="{{ url_for('triage_shortlist') }}">send them</a>) or waiting for their group
+     leader to pick a reviewer.</p>
   <div class="chips">
     {% for a in unassigned %}
     <a href="{{ url_for('student', cas_id=a.cas_id) }}" class="chip">{{ a.name }}</a>
@@ -87,6 +92,8 @@
     <span class="chip {{ 's' if p.applicants else '' }}">{{ p.applicants|length }} in queue</span>
   </div>
   {% if p.areas %}<div class="muted" style="font-size:13px;margin-top:2px">{{ p.areas|join(', ') }}</div>{% endif %}
+  {% if p.groups %}<div class="muted" style="font-size:13px;margin-top:2px">Groups:
+    {% for g in p.groups %}<a href="{{ url_for('group_home', gid=g.id) }}">{{ g.name }}</a>{{ ' (leader)' if g in p.leads }}{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}
 
   {% if p.applicants %}
   <table style="margin-top:10px">

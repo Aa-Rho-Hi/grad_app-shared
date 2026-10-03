@@ -3,12 +3,16 @@
 {% block body %}
 
 <p class="back"><a href="{{ url_for('index') }}">← Dashboard</a>
-   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Professor queues</a></p>
+   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Faculty</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('groups_view') }}">Groups</a></p>
 
 <div class="card">
   <h3 style="margin-top:0">Accounts</h3>
-  <p class="muted">Who can sign in, and as what. An <b>advisor</b> gets the whole flow;
-     a <b>professor</b> sees only the students assigned to them.</p>
+  <p class="muted">Who can sign in, and as what. An <b>advisor</b> (the grad office) gets the
+     whole flow and sends applicants to groups; a <b>professor</b> sees only the students
+     their group leader assigned to them. A professor who is named a group's leader on the
+     <a href="{{ url_for('groups_view') }}">Groups page</a> also gets that group's workspace:
+     handing out applicants and making the final call. No separate account needed.</p>
 
   {% if users %}
   <table style="margin-top:10px">

@@ -122,7 +122,9 @@ def test_index_served_from_cache_matches_record(tmp_path):
                       "warnings", "ocr", "summary_text", "review_status", "triage",
                       "assigned_to", "professor_status", "professor_decided_at",
                       "undergrad_degree", "has_packet", "source_file",
-                      "sop_sketch", "metrics", "profile", "screening"}
+                      "sop_sketch", "metrics", "profile", "screening",
+                      "professor_note", "group", "final_status", "final_decided_at",
+                      "final_by", "final_note"}
 
 
 # ---- scaling: reindex only re-analyzes the students an ingest touched -------

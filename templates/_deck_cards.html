@@ -18,12 +18,12 @@
     <div class="tcard-body">{{ summary_card(c.card_text) }}</div>
     <div class="tcard-fade"></div>
   </div>
-  {% if professors %}
+  {% if groups %}
   <div class="tcard-foot">
-    <label for="prof-{{ c.cas_id }}">Send to</label>
-    <select id="prof-{{ c.cas_id }}" class="prof-pick">
+    <label for="grp-{{ c.cas_id }}">Send to group</label>
+    <select id="grp-{{ c.cas_id }}" class="group-pick">
       <option value="">— decide later —</option>
-      {% for p in professors %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+      {% for g in groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}
     </select>
     <span class="muted" style="font-size:12px">applies when you shortlist; changeable later</span>
   </div>

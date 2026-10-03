@@ -42,8 +42,10 @@ def client(tmp, testing=True):
     # XSS and YAML-injection payloads below were landing in the developer's
     # live config/professors.yaml and appearing on the real dashboard.
     from src import triage as triagemod
+    from src import groups as groupsmod
     usersmod.USERS_YAML = os.path.join(tmp, "users.yaml")
     triagemod.PROFESSORS_YAML = os.path.join(tmp, "professors.yaml")
+    groupsmod.GROUPS_YAML = os.path.join(tmp, "groups.yaml")
     appmod.DATA = tmp
     os.makedirs(os.path.join(tmp, "raw"), exist_ok=True)
     appmod.app.config.update(TESTING=testing)
@@ -142,6 +144,10 @@ def main(tmp):
                follow_redirects=True)
     check("javascript: profile URL refused", b"http://" in r.data or b"https://" in r.data)
 
+    c.post("/groups/add", data={"name": "<img src=x onerror=alert(2)>"}, follow_redirects=True)
+    page = c.get("/groups").get_data(as_text=True) + c.get("/").get_data(as_text=True)
+    check("group name escaped", "<img src=x onerror=alert(2)" not in page)
+
     # YAML round-trip safety: a name full of YAML metacharacters
     weird = "*anchor: &a [{'x': 1}]\n#comment"
     c.post("/professors/add", data={"name": weird}, follow_redirects=True)
@@ -189,9 +195,13 @@ def main(tmp):
     check("bogus direction 400s",
           c.post("/triage/swipe", data={"cas_id": ids[0] if ids else "x",
                                         "direction": "../../etc"}).status_code == 400)
-    check("assign to unknown professor 400s",
+    check("send to unknown group 400s",
           c.post("/triage/assign", data={"cas_id": ids[0] if ids else "x",
-                                         "professor": "ghost"}).status_code == 400)
+                                         "group": "ghost"}).status_code == 400)
+    check("unknown group page 404s", c.get("/group/ghost").status_code == 404)
+    check("delete unknown group doesn't 500",
+          c.post("/groups/delete", data={"id": "ghost"},
+                 follow_redirects=True).status_code == 200)
     check("delete unknown professor doesn't 500",
           c.post("/professors/delete", data={"id": "ghost"},
                  follow_redirects=True).status_code == 200)

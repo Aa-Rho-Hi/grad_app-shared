@@ -1,7 +1,10 @@
 """Accounts and roles — one app, two jobs.
 
-    advisor    the whole flow: upload, the review spreadsheet, triage, queues
-    professor  their own assigned students, and nothing else
+    advisor    the whole flow: upload, the review spreadsheet, triage, and
+               sending shortlisted applicants to review groups
+    professor  the students their group leader assigned to them; a professor
+               named as a group's leader (config/groups.yaml) also gets that
+               group's workspace: handing out applicants, the final call
 
 Login is **off until you create a user**. A single reviewer on a laptop
 shouldn't have to authenticate to themselves, and every existing route keeps

@@ -4,13 +4,14 @@
 
 <p class="back"><a href="{{ url_for('applicants') }}">← All applicants</a>
    &nbsp;·&nbsp; <a href="{{ url_for('triage') }}">Triage deck{% if remaining %} ({{ remaining }} left){% endif %}</a>
-   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Professor queues</a></p>
+   &nbsp;·&nbsp; <a href="{{ url_for('groups_view') }}">Groups</a></p>
 
 {% if applicants %}
 <div class="card">
   <h3 style="margin-top:0">Shortlist <span class="chip">{{ applicants|length }}</span></h3>
-  <p class="muted">Everyone you swiped right. Pick the professor who should review them —
-     one each; picking again moves them.</p>
+  <p class="muted">Everyone you swiped right. Send each one to a review group; the group's
+     leader picks the reviewer and makes the final call. Moving someone to a different
+     group starts that group's review over.</p>
 </div>
 
 {% for a in applicants %}
@@ -26,10 +27,11 @@
       </div>
     </div>
     <div>
-      {% if a.professor %}
-        <span class="chip s" data-chip="{{ a.cas_id }}">→ {{ a.professor.name }}</span>
+      {% if a.group_obj %}
+        <span class="chip s" data-chip="{{ a.cas_id }}">→ {{ a.group_obj.name }}</span>
+        <div class="muted" style="font-size:12px;margin-top:4px;text-align:right">{{ a.stage_label }}</div>
       {% else %}
-        <span class="chip w" data-chip="{{ a.cas_id }}">unassigned</span>
+        <span class="chip w" data-chip="{{ a.cas_id }}">not sent</span>
       {% endif %}
     </div>
   </div>
@@ -37,14 +39,16 @@
   <form action="{{ url_for('triage_assign') }}" method="post" class="assign">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="cas_id" value="{{ a.cas_id }}">
-    <label for="p-{{ a.cas_id }}">Reviewer</label>
-    <select id="p-{{ a.cas_id }}" name="professor">
-      <option value="" {{ 'selected' if not a.professor }}>— not assigned —</option>
-      {% for p in professors %}
-      <option value="{{ p.id }}" {{ 'selected' if a.professor and a.professor.id == p.id }}>{{ p.name }}</option>
+    <label for="g-{{ a.cas_id }}">Group</label>
+    <select id="g-{{ a.cas_id }}" name="group" data-current="{{ a.group_obj.id if a.group_obj else '' }}"
+            data-name="{{ a.name }}">
+      <option value="" {{ 'selected' if not a.group_obj }}>— not sent —</option>
+      {% for g in groups %}
+      <option value="{{ g.id }}" {{ 'selected' if a.group_obj and a.group_obj.id == g.id }}>{{ g.name }}{{ ' (suggested)' if a.suggested and a.suggested.id == g.id }}</option>
       {% endfor %}
     </select>
     <button type="submit">Save</button>
+    {% if a.suggested and not a.group_obj %}<span class="muted" style="font-size:12px">suggested from their areas: {{ a.suggested.name }}</span>{% endif %}
   </form>
 </div>
 {% endfor %}
@@ -58,10 +62,9 @@
 {% endif %}
 
 <div class="card">
-  <p class="muted" style="margin:0">Professors are listed in <code>config/professors.yaml</code> —
-    edit that file to change who appears here.
-    {% for p in professors %}{% if p.url %}<a href="{{ p.url }}" target="_blank" rel="noopener">{{ p.name }}</a>{% if not loop.last %} · {% endif %}{% endif %}{% endfor %}
-  </p>
+  <p class="muted" style="margin:0">{% if groups %}Groups and their leaders are set up on the
+    <a href="{{ url_for('groups_view') }}">Groups page</a>.{% else %}No review groups yet.
+    <a href="{{ url_for('groups_view', edit=1) }}">Set them up</a> before sending anyone.{% endif %}</p>
 </div>
 
 <style>
@@ -77,11 +80,21 @@
 document.querySelectorAll('form.assign').forEach(function(form){
   const sel = form.querySelector('select');
   function save(){
+    // Moving someone out of a group clears their reviewer and any calls made
+    // there, so ask first. Sending someone for the first time just goes.
+    const was = sel.dataset.current;
+    if (was && sel.value !== was &&
+        !window.confirm('Move ' + sel.dataset.name + ' out of their current group? ' +
+                        'Their reviewer and any calls made there are cleared.')) {
+      sel.value = was;
+      return;
+    }
     window.postForm(form, function(data){
+      sel.dataset.current = data.group || '';
       const chip = document.querySelector('[data-chip="' + data.cas_id + '"]');
       if (chip){
-        chip.textContent = data.professor ? '→ ' + data.name : 'unassigned';
-        chip.className = 'chip ' + (data.professor ? 's' : 'w');
+        chip.textContent = data.group ? '→ ' + data.name : 'not sent';
+        chip.className = 'chip ' + (data.group ? 's' : 'w');
       }
     });
   }

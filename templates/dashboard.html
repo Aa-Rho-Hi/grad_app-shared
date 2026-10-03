@@ -6,13 +6,14 @@
   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
     <div>
       <h3 style="margin:0">Dashboard</h3>
-      <p class="muted" style="margin:2px 0 0">Who is waiting on whom, and what each
-         professor said. The status report is the same thing as a spreadsheet —
-         one row per applicant, every verdict on it.</p>
+      <p class="muted" style="margin:2px 0 0">Where every shortlisted applicant is: which group
+         has them, who's reviewing, and the leader's final call. The status report is the
+         same thing as a spreadsheet.</p>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <a href="{{ url_for('step_upload') }}"><button type="button" class="primary">Start the flow →</button></a>
       <a href="{{ url_for('prescreen') }}"><button type="button">Prescreen</button></a>
+      <a href="{{ url_for('groups_view') }}"><button type="button">Groups</button></a>
       <a href="{{ url_for('download_status') }}"><button type="button">⬇ Status report (.xlsx)</button></a>
       <a href="{{ url_for('applicants') }}"><button type="button">All applicants</button></a>
       <a href="{{ url_for('summaries') }}"><button type="button">Summaries</button></a>
@@ -25,72 +26,85 @@
       <b>{{ total }}</b><span>on file</span></a>
     <a class="stat" href="{{ url_for('triage') }}">
       <b>{{ tbd }}</b><span>waiting in triage</span></a>
-    <a class="stat" href="{{ url_for('summaries') }}">
-      <b>{{ reviewed }}</b><span>you reviewed</span></a>
     <a class="stat" href="{{ url_for('triage_shortlist') }}">
       <b>{{ shortlist }}</b><span>shortlisted</span></a>
-    <div class="stat"><b>{{ answered }}</b><span>answered by a professor</span></div>
+    <a class="stat" href="{{ url_for('groups_view') }}">
+      <b>{{ in_groups }}</b><span>sent to a group</span></a>
+    <div class="stat"><b>{{ finals }}</b><span>final calls made</span></div>
   </div>
 </div>
 
-{% if unassigned %}
+{% if not_sent %}
 <div class="card">
-  <h3 style="margin-top:0">Not assigned yet <span class="chip w">{{ unassigned|length }}</span></h3>
-  <p class="muted">Shortlisted but in nobody's queue — they're waiting on you, not on a
-     professor. <a href="{{ url_for('triage_shortlist') }}">Assign them</a>.</p>
+  <h3 style="margin-top:0">Not sent to a group yet <span class="chip w">{{ not_sent|length }}</span></h3>
+  <p class="muted">Shortlisted but no group has them — they're waiting on you.
+     <a href="{{ url_for('triage_shortlist') }}">Send them to a group</a>.</p>
   <div class="chips">
-    {% for a in unassigned %}
+    {% for a in not_sent %}
     <a href="{{ url_for('student', cas_id=a.cas_id) }}" class="chip">{{ a.name }}</a>
     {% endfor %}
   </div>
 </div>
 {% endif %}
 
-{% for p in professors %}
+{% for g in groups %}
 <div class="card">
   <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
-    <h3 style="margin:0">
-      {% if p.url %}<a href="{{ p.url }}" target="_blank" rel="noopener">{{ p.name }}</a>{% else %}{{ p.name }}{% endif %}
-    </h3>
+    <h3 style="margin:0"><a href="{{ url_for('group_home', gid=g.id) }}">{{ g.name }}</a>
+      <span class="muted" style="font-weight:400;font-size:13px">· leader:
+        {{ names.get(g.leader) or 'none set' }}</span></h3>
     <div class="chips" style="margin:0">
-      {% if p.waiting %}<span class="chip d-tbd">{{ p.waiting|length }} to review</span>{% endif %}
-      {% if p.accepted %}<span class="chip s">{{ p.accepted|length }} accepted</span>{% endif %}
-      {% if p.rejected %}<span class="chip w">{{ p.rejected|length }} rejected</span>{% endif %}
-      {% if not p.assigned %}<span class="chip">nobody assigned</span>{% endif %}
+      {% if g.stages.to_distribute %}<span class="chip d-tbd">{{ g.stages.to_distribute|length }} to assign</span>{% endif %}
+      {% if g.stages.with_reviewer %}<span class="chip d-tbd">{{ g.stages.with_reviewer|length }} with reviewers</span>{% endif %}
+      {% if g.stages.ready_for_final %}<span class="chip d-tbd">{{ g.stages.ready_for_final|length }} awaiting final call</span>{% endif %}
+      {% if g.accepted %}<span class="chip s">{{ g.accepted|length }} accepted</span>{% endif %}
+      {% if g.rejected %}<span class="chip w">{{ g.rejected|length }} rejected</span>{% endif %}
+      {% if not g.applicants %}<span class="chip">nobody sent yet</span>{% endif %}
     </div>
   </div>
 
-  {% if p.assigned %}
+  {% if g.applicants %}
   <table style="margin-top:10px">
-    <thead><tr><th>Student</th><th>GPA</th><th>Areas</th><th>Their call</th><th>When</th></tr></thead>
+    <thead><tr><th>Student</th><th>Reviewer</th><th>First call</th><th>Final call</th><th>When</th></tr></thead>
     <tbody>
-      {% for a in p.assigned %}
-      {% set m = a.metrics or {} %}
+      {% for a in g.applicants %}
       <tr>
         <td><a href="{{ url_for('student', cas_id=a.cas_id) }}">{{ a.name }}</a>
             <span class="muted">· {{ a.cas_id }}</span></td>
-        <td>{{ m.get('gpa_value') or '—' }}</td>
-        <td class="muted">{{ (m.get('areas') or [])|join(', ') or '—' }}</td>
+        <td>{{ names.get(a.assigned_to) or (a.assigned_to or '—') }}</td>
         <td>
-          {% if a.professor_status == 'accept' %}<span class="chip s">accepted</span>
-          {% elif a.professor_status == 'reject' %}<span class="chip w">rejected</span>
-          {% else %}<span class="chip d-tbd">waiting</span>{% endif %}
+          {% if a.professor_status == 'accept' %}<span class="chip s">accept</span>
+          {% elif a.professor_status == 'reject' %}<span class="chip w">reject</span>
+          {% elif a.assigned_to %}<span class="chip d-tbd">waiting</span>
+          {% else %}<span class="muted">—</span>{% endif %}
         </td>
-        <td class="muted">{{ (a.professor_decided_at or '—')[:10] }}</td>
+        <td>
+          {% if a.final_status == 'accept' %}<span class="chip s">accept</span>
+          {% elif a.final_status == 'reject' %}<span class="chip w">reject</span>
+          {% elif a.professor_status %}<span class="chip d-tbd">waiting</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td class="muted">{{ (a.final_decided_at or a.professor_decided_at or '—')[:10] }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
-  {% else %}
-  <p class="muted" style="margin:8px 0 0">Nothing in this queue yet —
-     shortlist someone in <a href="{{ url_for('triage') }}">triage</a> and send them here.</p>
   {% endif %}
 </div>
 {% endfor %}
 
-{% if not professors %}
-<div class="card"><p class="muted">No professors configured.
-  <a href="{{ url_for('professors_view', edit=1) }}">Add some</a>.</p></div>
+{% if orphans %}
+<div class="card" style="border-color:#f3c9c4">
+  <h3 style="margin-top:0">Sent to a group that no longer exists <span class="chip w">{{ orphans|length }}</span></h3>
+  <p class="muted">Send them to a current group from the <a href="{{ url_for('triage_shortlist') }}">shortlist</a>.</p>
+  <div class="chips">{% for a in orphans %}<a href="{{ url_for('student', cas_id=a.cas_id) }}" class="chip">{{ a.name }}</a>{% endfor %}</div>
+</div>
+{% endif %}
+
+{% if not groups %}
+<div class="card"><p class="muted">No review groups yet.
+  <a href="{{ url_for('groups_view', edit=1) }}">Set them up</a>: give each one a leader
+  and its members from the faculty list.</p></div>
 {% endif %}
 
 <style>

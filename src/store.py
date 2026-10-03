@@ -493,6 +493,14 @@ class Store:
             "assigned_to": unified.get("assigned_to", ""),
             "professor_status": unified.get("professor_status", ""),
             "professor_decided_at": unified.get("professor_decided_at", ""),
+            "professor_note": unified.get("professor_note", ""),
+            # The group pipeline (src/groups.py): which group the grad office
+            # sent them to, and the leader's final call.
+            "group": unified.get("group", ""),
+            "final_status": unified.get("final_status", ""),
+            "final_decided_at": unified.get("final_decided_at", ""),
+            "final_by": unified.get("final_by", ""),
+            "final_note": unified.get("final_note", ""),
             "metrics": applicant_metrics(unified),
             # The grad office's prescreen: the fields they asked for, and the
             # rule outcome. Cached like everything else here; `index()`

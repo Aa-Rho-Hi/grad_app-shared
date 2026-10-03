@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}{{ group.name }} — Grad App{% endblock %}
+{% block body %}
+
+{% macro who(a) -%}
+  <a href="{{ url_for('student', cas_id=a.cas_id) }}">{{ a.name }}</a>
+  <div class="muted" style="font-size:12px">{{ a.cas_id }}
+    {%- set m = a.metrics or {} %}{% if m.get('gpa_value') %} · GPA {{ m.get('gpa_value') }}{% endif %}
+    {%- if m.get('areas') %} · {{ m.get('areas')[:3]|join(', ') }}{% endif %}
+    {%- set s = a.screening or {} %}{% if s.outcome %} · prescreen: {{ s.outcome }}{% endif %}</div>
+{%- endmacro %}
+
+{% macro reviewer_form(a) -%}
+  <form action="{{ url_for('group_assign', gid=group.id) }}" method="post" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="cas_id" value="{{ a.cas_id }}">
+    <select name="reviewer" onchange="this.form.submit()" {{ 'disabled' if not can_act }} aria-label="Reviewer for {{ a.name }}">
+      <option value="" {{ 'selected' if not a.assigned_to }}>— pick a reviewer —</option>
+      {% for p in pool %}<option value="{{ p.id }}" {{ 'selected' if a.assigned_to == p.id }}>{{ p.name }} ({{ load[p.id] }} open)</option>{% endfor %}
+    </select>
+    <noscript><button type="submit">Save</button></noscript>
+  </form>
+{%- endmacro %}
+
+{% macro final_form(a) -%}
+  <form action="{{ url_for('group_final', gid=group.id) }}" method="post" class="inline final">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="cas_id" value="{{ a.cas_id }}">
+    <input type="text" name="note" placeholder="Note (optional)" maxlength="1000">
+    <button type="submit" name="decision" value="accept" class="yes">Accept</button>
+    <button type="submit" name="decision" value="reject" class="no">Reject</button>
+  </form>
+{%- endmacro %}
+
+{% macro call_chip(v) -%}
+  {% if v == 'accept' %}<span class="chip s">accept</span>{% elif v == 'reject' %}<span class="chip w">reject</span>{% else %}<span class="chip d-tbd">waiting</span>{% endif %}
+{%- endmacro %}
+
+<p class="back">{% if is_advisor %}<a href="{{ url_for('groups_view') }}">← Groups</a>{% else %}<a href="{{ url_for('professor_home') }}">← Your queue</a>{% endif %}</p>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+    <div>
+      <h3 style="margin:0">{{ group.name }}</h3>
+      <p class="muted" style="margin:4px 0 0">Leader: {{ leader_name or 'none set' }} · {{ total }} applicant(s) sent here.
+        Hand each one to a member; they make the first call, you make the final call.</p>
+    </div>
+    {% if can_act and stages.to_distribute and pool %}
+    <form action="{{ url_for('group_split', gid=group.id) }}" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="primary" title="Gives each unassigned applicant to the member with the fewest open ones (area match breaks ties)">Split {{ stages.to_distribute|length }} evenly across members</button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="chips" style="margin-top:10px">
+    {% for p in pool %}<span class="chip">{{ p.name }} · {{ load[p.id] }} open</span>{% endfor %}
+    {% if not pool %}<span class="chip w">no members yet</span>{% endif %}
+  </div>
+  {% if not can_act %}
+  <p class="muted" style="margin:10px 0 0">You're looking at this group as the grad office.
+    Only {{ leader_name or 'its leader' }} can assign reviewers and make final calls.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Assign a reviewer <span class="chip {{ 'd-tbd' if stages.to_distribute else '' }}">{{ stages.to_distribute|length }}</span></h3>
+  {% if stages.to_distribute %}
+  <table><thead><tr><th>Applicant</th><th>Reviewer</th></tr></thead><tbody>
+    {% for a in stages.to_distribute %}<tr><td>{{ who(a) }}</td><td>{{ reviewer_form(a) }}</td></tr>{% endfor %}
+  </tbody></table>
+  {% else %}<p class="muted">Everyone here has a reviewer.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Ready for your final call <span class="chip {{ 'd-tbd' if stages.ready_for_final else '' }}">{{ stages.ready_for_final|length }}</span></h3>
+  {% if stages.ready_for_final %}
+  <table><thead><tr><th>Applicant</th><th>Reviewer's first call</th><th>Final call</th></tr></thead><tbody>
+    {% for a in stages.ready_for_final %}
+    <tr><td>{{ who(a) }}</td>
+        <td>{{ a.reviewer_name }}: {{ call_chip(a.professor_status) }}
+            {% if a.professor_note %}<div class="note">“{{ a.professor_note }}”</div>{% endif %}</td>
+        <td>{% if can_act %}{{ final_form(a) }}{% else %}<span class="muted">leader's call</span>{% endif %}</td></tr>
+    {% endfor %}
+  </tbody></table>
+  {% else %}<p class="muted">Nothing waiting on you. Applicants land here once their reviewer makes the first call.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">With reviewers <span class="chip">{{ stages.with_reviewer|length }}</span></h3>
+  {% if stages.with_reviewer %}
+  <table><thead><tr><th>Applicant</th><th>Reviewer</th><th></th></tr></thead><tbody>
+    {% for a in stages.with_reviewer %}
+    <tr><td>{{ who(a) }}</td><td>{{ reviewer_form(a) }}</td>
+        <td>{% if can_act and a.assigned_to == group.leader %}<span class="muted" style="font-size:12px">You're the reviewer, so one call counts as both:</span>{{ final_form(a) }}
+            {% else %}{{ call_chip('') }}{% endif %}</td></tr>
+    {% endfor %}
+  </tbody></table>
+  {% else %}<p class="muted">Nobody is out with a reviewer right now.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Decided <span class="chip">{{ stages.decided|length }}</span></h3>
+  {% if stages.decided %}
+  <table><thead><tr><th>Applicant</th><th>First call</th><th>Final call</th><th></th></tr></thead><tbody>
+    {% for a in stages.decided %}
+    <tr><td>{{ who(a) }}</td>
+        <td>{{ a.reviewer_name }}: {{ call_chip(a.professor_status) }}
+            {% if a.professor_note %}<div class="note">“{{ a.professor_note }}”</div>{% endif %}</td>
+        <td>{{ call_chip(a.final_status) }}
+            <span class="muted" style="font-size:12px">{{ (a.final_decided_at or '')[:10] }}</span>
+            {% if a.final_note %}<div class="note">“{{ a.final_note }}”</div>{% endif %}</td>
+        <td>{% if can_act %}
+          <form action="{{ url_for('group_final', gid=group.id) }}" method="post" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="cas_id" value="{{ a.cas_id }}">
+            <button type="submit" name="decision" value="undo">↺ Undo</button>
+          </form>{% endif %}</td></tr>
+    {% endfor %}
+  </tbody></table>
+  {% else %}<p class="muted">No final calls yet.</p>{% endif %}
+</div>
+
+<style>
+  form.inline{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0}
+  form.inline select{min-width:220px;font-size:13px;padding:6px 8px}
+  form.final input[type=text]{font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;min-width:160px}
+  form.inline button{font-size:13px;padding:6px 12px;border:1px solid var(--line-strong);
+                     background:#fff;color:var(--ink);border-radius:8px;cursor:pointer}
+  button.yes{border-color:var(--high-line);color:var(--high);background:#fff}
+  button.yes:hover{background:var(--high-bg)}
+  button.no{border-color:var(--low-line);color:var(--low);background:#fff}
+  button.no:hover{background:var(--low-bg)}
+  .note{font-size:12px;color:var(--muted);margin-top:4px;max-width:360px}
+  td{vertical-align:top}
+</style>
+{% endblock %}

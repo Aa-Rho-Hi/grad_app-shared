@@ -168,22 +168,53 @@ is a field of study, not a degree, and is blank for a third of the sample rows;
 filling the column from it would put a guess where a reviewer reads fact, so
 with no packet the cell stays empty.
 
-## The swipe pass and the professor queues
+## The swipe pass and the review groups
 
 After the spreadsheet narrows the pool to `tbd`, `triage.py` is the second read:
 one card per applicant, sized to a single screen, swipe right to shortlist and
-left to reject (`/triage`). What survives goes to exactly one professor's queue
-from `config/professors.yaml` (`/triage/shortlist` → `/professors`).
+left to reject (`/triage`). What survives is sent to one **review group**
+(`groups.py`, `config/groups.yaml`), and the group takes it from there:
 
-Two fields, kept apart on purpose:
+```
+grad office --send to group--> group leader --assign--> reviewer (member)
+                                     ^                        |
+                                     +---- final call <-- first call
+```
+
+Each step keeps its own field, so disagreements stay visible:
 
 | Field | Set by | Meaning |
 |---|---|---|
 | `review_status` | the spreadsheet's `status` column | accept / reject / tbd |
-| `triage` | a swipe | shortlist / reject |
-| `assigned_to` | the shortlist page | one professor id |
+| `triage` | the grad office's swipe | shortlist / reject |
+| `group` | the grad office (shortlist page or the card) | one group id |
+| `assigned_to` | the group leader | one member's professor id |
+| `professor_status` (+ `professor_note`) | that member: the first call | accept / reject |
+| `final_status` (+ `final_note`, `final_by`) | the group leader: the final call | accept / reject |
 
-A left swipe writes both (`triage=reject` **and** `review_status=reject`), so
+Rules (`groups.py`, all unit-tested):
+
+- A group is a leader plus members, all professor ids from `config/professors.yaml`,
+  so a rename never breaks a group. A leader is just a professor named as one
+  group's leader: no new account type, and the leader can also review.
+- The final call needs the first call first. When the leader is the reviewer,
+  one call counts as both.
+- Moving an applicant upstream clears what was downstream: a different group
+  starts that group's review over, a different reviewer drops the old first
+  call. After the final call the reviewer is locked until the leader undoes it,
+  and the member can't change their first call under it.
+- "Split evenly" hands every unassigned applicant to the member with the fewest
+  open reviews; area overlap breaks ties.
+- Taking someone out of a group (or off the faculty list) sends their open
+  reviews back to the leader; deleting a group sends its applicants back to the
+  shortlist.
+
+Who sees what (`app._leads`, `app._may_view`): the grad office sees everything
+and can open a group's page but not act in it; a leader acts only in their own
+group and can open its applicants; a member sees only applicants assigned to
+them. With no logins configured there is one operator who can do everything.
+
+A left swipe writes both `triage=reject` **and** `review_status=reject`, so
 the applicant leaves the tbd pool. A right swipe only sets `triage`, leaving the
 spreadsheet's own verdict alone. `undo` restores `review_status` to tbd, which is
 only safe because the deck contains nothing else.
@@ -197,8 +228,8 @@ a summary says; this only decides how much of it fits on screen.
 
 ## Output
 
-- **`status_report.py`** — the advisor's .xlsx export: one row per applicant carrying all three verdicts (spreadsheet `status`, advisor `triage`, `professor_status`) plus the professor's name, and a per-professor tally sheet. `rows_for()`/`summarize()` are plain data so the shape can be tested without openpyxl. Values, not formulas: a snapshot that silently recalculated after an edit would misreport what was true when it was taken.
-- **`users.py`** — accounts and roles. Login is off until `config/users.yaml` has an entry, which keeps the single-reviewer setup working and makes the switch explicit; passwords are PBKDF2 hashes. `advisor` reaches the whole flow, `professor` only their own queue. Role checks return 403 rather than redirecting, and a professor's decision route re-checks `assigned_to` server-side so a copied link changes nothing.
+- **`status_report.py`** — the grad office's .xlsx export: one row per applicant carrying every call (spreadsheet `status`, the swipe, the group and its leader, the reviewer's first call and note, the leader's final call and note), and a per-group tally sheet. `rows_for()`/`summarize()` are plain data so the shape can be tested without openpyxl. Values, not formulas: a snapshot that silently recalculated after an edit would misreport what was true when it was taken.
+- **`users.py`** — accounts and roles. Login is off until `config/users.yaml` has an entry, which keeps the single-reviewer setup working and makes the switch explicit; passwords are PBKDF2 hashes. `advisor` reaches the whole flow, `professor` only their own queue, plus the workspace of any group they lead. Role checks return 403 rather than redirecting, and a professor's decision route re-checks `assigned_to` server-side so a copied link changes nothing.
 - **`jobs.py`** — a one-process background job registry so a long ingest can report progress. The upload posts by fetch, the page polls `/jobs/<id>`, and the packet ingester calls back per PDF. Nothing is persisted: a job that dies with the process is work the reviewer re-runs, and the records it already merged are in the store either way.
 - **`triage.py`** — the swipe pass: deck selection, swipe/undo semantics, the one-screen card, and the professor list (load/add/rename/delete, written back to `config/professors.yaml` atomically; ids are generated once and never rewritten so a rename can't empty a queue, and profile links are scheme-checked before they reach an `href`) with their queues.
 - **`review.py`** — the review pass above: degree extraction, status parsing and normalization (`Accept`, `deny`, `T` all land somewhere sensible; anything unrecognized is "undecided", never a guess), the `tbd` filter, and the openpyxl writer for the review workbook.

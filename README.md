@@ -67,6 +67,24 @@ pandas/openpyxl, and numeric-looking IDs (e.g. `1001.0`) are cleaned back to tex
 - **GPA scale varies per university**, so it is auto-detected per value (≤4.3→4.0, ≤5→5.0, ≤10→10.0, ≤20→20.0, else→100) and normalized to 4.0. Force a scale with `gpa.gpa_scale` in `config/csv_field_map.yaml`.
 - **Data-quality flags** (e.g. "No GRE score on file") are factual notes for the reviewer, shown in the UI — not judgements.
 
+## Review groups
+
+Shortlisted applicants go to **groups**, not straight to a professor:
+
+1. The grad office sends each one to a group (shortlist page, or the picker on
+   the triage card).
+2. The group's **leader** hands them to members of the group (one by one, or
+   "Split evenly").
+3. The member makes the **first call** (accept / pass, with an optional note).
+4. The leader makes the **final call**, seeing the member's call and note.
+
+Groups are a leader plus members picked from the faculty list, set up on the
+Groups page (or `config/groups.yaml`). A leader is just a professor login
+named as a group's leader; they see a "Groups you lead" panel on their page.
+Members only see applicants assigned to them; the grad office sees everything
+but leaves the final call to the leader. The status report has one row per
+applicant with the group, reviewer, both calls and both notes.
+
 ## Prescreen (grad office rules)
 
 The ECEN grad office's admit rules, applied as **flags, never decisions**:

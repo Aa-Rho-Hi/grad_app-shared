@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Groups — Grad App{% endblock %}
+{% block body %}
+
+<p class="back"><a href="{{ url_for('index') }}">← Dashboard</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('triage_shortlist') }}">Shortlist</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Faculty</a></p>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
+    <h3 style="margin:0">Review groups</h3>
+    <a href="{{ url_for('groups_view', edit=None if editing else 1) }}"><button type="button">
+      {{ '← Back to groups' if editing else '✎ Edit groups' }}</button></a>
+  </div>
+  <p class="muted" style="margin:8px 0 0">You send each shortlisted applicant to a group. The
+     group's leader hands them to members, each member makes the first call, and the leader
+     makes the final call.</p>
+</div>
+
+{% if editing %}
+<div class="card">
+  <h3 style="margin-top:0">Add a group</h3>
+  {% if not professors %}
+  <p class="muted">Add people to the <a href="{{ url_for('professors_view', edit=1) }}">faculty list</a>
+     first; leaders and members come from it.</p>
+  {% endif %}
+  <form action="{{ url_for('groups_add') }}" method="post" class="gform">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="row">
+      <input type="text" name="name" placeholder="Group name" required>
+      <select name="leader">
+        <option value="">Leader…</option>
+        {% for p in professors %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+      </select>
+      <input type="text" name="areas" placeholder="Areas, comma separated (optional)">
+    </div>
+    <div class="members">
+      <span class="muted" style="font-size:12px">Members:</span>
+      {% for p in professors %}
+      <label><input type="checkbox" name="members" value="{{ p.id }}"> {{ p.name }}</label>
+      {% endfor %}
+    </div>
+    <button type="submit" class="primary">Add group</button>
+  </form>
+</div>
+
+{% for g in groups %}
+<div class="card">
+  <form action="{{ url_for('groups_update') }}" method="post" class="gform">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="id" value="{{ g.id }}">
+    <div class="row">
+      <input type="text" name="name" value="{{ g.name }}" required>
+      <select name="leader">
+        <option value="" {{ 'selected' if not g.leader }}>No leader</option>
+        {% for p in professors %}<option value="{{ p.id }}" {{ 'selected' if g.leader == p.id }}>{{ p.name }}</option>{% endfor %}
+      </select>
+      <input type="text" name="areas" value="{{ g.areas|join(', ') }}" placeholder="Areas">
+    </div>
+    <div class="members">
+      <span class="muted" style="font-size:12px">Members:</span>
+      {% for p in professors %}
+      <label><input type="checkbox" name="members" value="{{ p.id }}" {{ 'checked' if p.id in g.members }}> {{ p.name }}</label>
+      {% endfor %}
+    </div>
+    <button type="submit">Save</button>
+    <button type="submit" form="gdel-{{ g.id }}" class="danger"
+            onclick="return confirm({{ ('Remove ' ~ g.name ~ '? ' ~ (g.applicants|length) ~ ' applicant(s) sent to it go back to the shortlist.')|tojson }})">Delete</button>
+    <span class="muted" style="font-size:12px">id: {{ g.id }}</span>
+  </form>
+  <form id="gdel-{{ g.id }}" action="{{ url_for('groups_delete') }}" method="post" style="display:none">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="id" value="{{ g.id }}">
+  </form>
+</div>
+{% endfor %}
+
+{% else %}
+
+{% if not_sent %}
+<div class="card">
+  <h3 style="margin-top:0">Not sent to a group yet <span class="chip w">{{ not_sent|length }}</span></h3>
+  <p class="muted">Shortlisted, waiting on you. <a href="{{ url_for('triage_shortlist') }}">Send them</a>.</p>
+  <div class="chips">{% for a in not_sent %}<a href="{{ url_for('student', cas_id=a.cas_id) }}" class="chip">{{ a.name }}</a>{% endfor %}</div>
+</div>
+{% endif %}
+
+{% for g in groups %}
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
+    <h3 style="margin:0"><a href="{{ url_for('group_home', gid=g.id) }}">{{ g.name }}</a></h3>
+    <span class="chip {{ 's' if g.applicants else '' }}">{{ g.applicants|length }} sent</span>
+  </div>
+  <div class="muted" style="font-size:13px;margin-top:4px">
+    Leader: {{ names.get(g.leader) or 'none set' }}
+    · Members: {% if g.members %}{% for m in g.members %}{{ names.get(m, m) }}{{ ', ' if not loop.last }}{% endfor %}{% else %}none yet{% endif %}
+    {% if g.areas %}· Areas: {{ g.areas|join(', ') }}{% endif %}
+  </div>
+  {% if not g.leader %}<p class="muted" style="color:var(--low)">No leader set: nobody can assign reviewers or make final calls for this group.</p>{% endif %}
+  <div class="chips" style="margin-top:8px">
+    {% for key in ['to_distribute', 'with_reviewer', 'ready_for_final', 'decided'] %}
+      {% if g.stages[key] %}<span class="chip {{ 's' if key == 'decided' else 'd-tbd' }}">{{ g.stages[key]|length }} {{ stage_labels[key] }}</span>{% endif %}
+    {% endfor %}
+  </div>
+</div>
+{% else %}
+<div class="card"><p class="muted">No groups yet. <a href="{{ url_for('groups_view', edit=1) }}">Add the first one</a>.</p></div>
+{% endfor %}
+
+{% if orphans %}
+<div class="card" style="border-color:#f3c9c4">
+  <h3 style="margin-top:0">Sent to a group that no longer exists <span class="chip w">{{ orphans|length }}</span></h3>
+  <div class="chips">{% for a in orphans %}<a href="{{ url_for('student', cas_id=a.cas_id) }}" class="chip">{{ a.name }}</a>{% endfor %}</div>
+</div>
+{% endif %}
+{% endif %}
+
+<style>
+  .gform .row{display:flex;flex-wrap:wrap;gap:8px}
+  .gform input[type=text], .gform select{font-size:14px;padding:8px 10px;border:1px solid var(--line);
+    border-radius:8px;min-width:180px;flex:1}
+  .gform .members{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin:10px 0}
+  .gform .members label{font-size:13px;display:flex;align-items:center;gap:4px;font-weight:400}
+  .gform button{font-size:13px;padding:8px 14px}
+  .gform button.danger{border-color:var(--low-line);color:var(--low);background:#fff}
+</style>
+{% endblock %}

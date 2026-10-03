@@ -12,6 +12,21 @@
   </div>
 </div>
 
+{% if group or reviewer or unified.professor_status %}
+<div class="card">
+  <h3 style="margin-top:0">Review</h3>
+  <div class="kv">
+    <div><b>Group:</b> {% if group %}<a href="{{ url_for('group_home', gid=group.id) }}">{{ group.name }}</a>{% else %}not sent to a group{% endif %}
+      <span class="muted">· {{ stage_label }}</span></div>
+    <div><b>Reviewer:</b> {{ reviewer.name if reviewer else (unified.assigned_to or 'not assigned yet') }}</div>
+    <div><b>First call:</b> {{ unified.professor_status or 'waiting' }}{% if unified.professor_decided_at %} <span class="muted">({{ unified.professor_decided_at[:10] }})</span>{% endif %}
+      {% if unified.professor_note %}<div class="muted">“{{ unified.professor_note }}”</div>{% endif %}</div>
+    <div><b>Final call:</b> {{ unified.final_status or 'waiting' }}{% if unified.final_decided_at %} <span class="muted">({{ unified.final_decided_at[:10] }}{% if unified.final_by %}, {{ unified.final_by }}{% endif %})</span>{% endif %}
+      {% if unified.final_note %}<div class="muted">“{{ unified.final_note }}”</div>{% endif %}</div>
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
   <h3 style="margin-top:0">Prescreen
     {% if screening.outcome == ADMIT %}<span class="chip s">Admit</span>
