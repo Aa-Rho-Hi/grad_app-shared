@@ -28,6 +28,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 DEGREE_COLUMN = "undergrad_degree"
 STATUS_COLUMN = "status"
+# Clickable link to the applicant's page in the app (asked for by the grad
+# office so a spreadsheet sent to a group opens straight to each profile).
+LINK_COLUMN = "summary_link"
 STATUSES = ("accept", "reject", "tbd")
 
 # Headers accepted when reading a marked-up sheet. `status` is the one this app
@@ -248,6 +251,7 @@ _HOW_TO = [
                           "rows stay in the record but drop off the summaries page — "
                           "they're already decided."),
     ("", ""),
+    (LINK_COLUMN, "Opens the applicant's page in the app (sign in first)."),
     (DEGREE_COLUMN, "Read out of the applicant's packet (résumé, then transcript). "
                     "Blank means no packet was uploaded, or no line in it names a "
                     "bachelor-level degree — it is never inferred from the "
@@ -297,7 +301,8 @@ def _roster_frame(entries: List[Dict[str, Any]], raw_dir: str):
     return pd.DataFrame(rows), ""
 
 
-def write_review_sheet(entries: List[Dict[str, Any]], raw_dir: str, out_path: str) -> str:
+def write_review_sheet(entries: List[Dict[str, Any]], raw_dir: str, out_path: str,
+                       link_base: Optional[str] = None) -> str:
     """Write the roster with `undergrad_degree` filled in and `status` blank.
 
     Takes index entries: the degree is cached on write, so building this for a
@@ -333,11 +338,20 @@ def write_review_sheet(entries: List[Dict[str, Any]], raw_dir: str, out_path: st
         degrees.append(rec.get(DEGREE_COLUMN, "") if rec else "")
         statuses.append(rec.get(STATUS_FIELD, "") if rec else "")
 
+    links = []
+    if link_base:
+        from .prescreen_report import link_for
+        for _i, row in frame.iterrows():
+            rec = _record_for(row)
+            links.append(link_for(link_base, rec["cas_id"]) if rec.get("cas_id") else "")
+
     columns = [str(c) for c in frame.columns]
     # Drop any previous review columns so re-exporting doesn't stack duplicates.
-    keep = [c for c in columns if _norm_header(c) not in (DEGREE_COLUMN, STATUS_COLUMN)]
+    keep = [c for c in columns
+            if _norm_header(c) not in (DEGREE_COLUMN, STATUS_COLUMN, LINK_COLUMN)]
     at = _insert_after(keep)
-    out_columns = keep[:at] + [STATUS_COLUMN, DEGREE_COLUMN] + keep[at:]
+    added = [STATUS_COLUMN, DEGREE_COLUMN] + ([LINK_COLUMN] if link_base else [])
+    out_columns = keep[:at] + added + keep[at:]
 
     wb = Workbook()
     ws = wb.active
@@ -347,6 +361,8 @@ def write_review_sheet(entries: List[Dict[str, Any]], raw_dir: str, out_path: st
         values = {c: row[c] for c in keep}
         values[STATUS_COLUMN] = statuses[i]
         values[DEGREE_COLUMN] = degrees[i]
+        if link_base:
+            values[LINK_COLUMN] = "Open" if links[i] else ""
         ws.append([values.get(c, "") for c in out_columns])
 
     header_font = Font(name=_FONT, bold=True)
@@ -358,6 +374,14 @@ def write_review_sheet(entries: List[Dict[str, Any]], raw_dir: str, out_path: st
     for row in ws.iter_rows(min_row=2):
         for cell in row:
             cell.font = body_font
+
+    if link_base:
+        l_idx = out_columns.index(LINK_COLUMN) + 1
+        link_font = Font(name=_FONT, color="0563C1", underline="single")
+        for i, row in enumerate(ws.iter_rows(min_row=2, min_col=l_idx, max_col=l_idx)):
+            if i < len(links) and links[i]:
+                row[0].hyperlink = links[i]
+                row[0].font = link_font
 
     d_idx = out_columns.index(STATUS_COLUMN) + 1
     g_idx = out_columns.index(DEGREE_COLUMN) + 1

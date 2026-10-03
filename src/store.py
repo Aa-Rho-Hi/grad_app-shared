@@ -39,6 +39,7 @@ from .merge import (applicant_metrics, merge_identity, new_student,
                     sources_present, summary_view, _is_cas_id, _norm_name)
 from .analyze import sketch
 from .review import undergrad_degree
+from .screening import evaluate as prescreen, profile as prescreen_profile, rules_version
 from .template import render
 
 DB_FILENAME = "students.db"
@@ -493,6 +494,11 @@ class Store:
             "professor_status": unified.get("professor_status", ""),
             "professor_decided_at": unified.get("professor_decided_at", ""),
             "metrics": applicant_metrics(unified),
+            # The grad office's prescreen: the fields they asked for, and the
+            # rule outcome. Cached like everything else here; `index()`
+            # recomputes it when the rules file has changed since.
+            "profile": prescreen_profile(unified),
+            "screening": prescreen(unified),
         }
 
     @staticmethod
@@ -581,12 +587,31 @@ class Store:
         finally:
             conn.close()
         out: List[Dict[str, Any]] = []
+        current = rules_version()
         for r in rows:
-            if r["index_json"]:
-                out.append(json.loads(r["index_json"]))
-            else:   # pre-migration row: compute from the full record
-                out.append(self._index_entry(json.loads(r["record"])))
+            entry = json.loads(r["index_json"]) if r["index_json"] else None
+            # Recompute (without writing) when there's no cached entry, or it
+            # was cached under different prescreen rules: someone edited
+            # config/screening_rules.yaml and expects to see the new verdicts.
+            # "Re-apply rules" on the Prescreen page persists it.
+            if entry is None or (entry.get("screening") or {}).get("rules_version") != current:
+                entry = self._index_entry(json.loads(r["record"]))
+            out.append(entry)
         return out
+
+    def refresh_index(self) -> int:
+        """Rewrite every cached index entry (and summary text) from its record.
+
+        For when the derivation changed but the data didn't: the prescreen
+        rules file was edited, or a new build adds summary fields. Cheaper than
+        `run.reindex(changed=None)`, which re-analyzes every essay too."""
+        with self._writing() as conn:
+            rows = conn.execute("SELECT record FROM students").fetchall()
+            for r in rows:
+                unified = json.loads(r["record"])
+                unified["summary"] = render(summary_view(unified))
+                self._write(conn, unified)
+            return len(rows)
 
     def clear_students(self) -> int:
         with self._writing() as conn:

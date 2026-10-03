@@ -32,6 +32,8 @@ class EducationEntry(BaseModel):
     college_name: Optional[str] = None
     country: Optional[str] = None
     state: Optional[str] = None
+    degree: Optional[str] = None
+    major: Optional[str] = None
     gpa: Optional[GPA] = None
 
 
@@ -57,6 +59,30 @@ class EnglishProficiency(BaseModel):
     toefl: Optional[List[TOEFLAttempt]] = None
     best_ielts_overall: Optional[float] = Field(default=None, ge=0, le=9)
     best_toefl_total: Optional[float] = Field(default=None, ge=0, le=120)
+    best_duolingo: Optional[float] = Field(default=None, ge=0, le=160)
+    best_pte: Optional[float] = Field(default=None, ge=0, le=90)
+    # TAMU's own English Language Proficiency Exam: reported as written
+    # ("Pass", "Exempt", a score), so it stays text.
+    elpe: Optional[str] = None
+
+
+class GRESections(BaseModel):
+    """GRE section scores as the export reports them. The 130-170 scale is
+    current; older exports carry the 200-800 scale, so the cap is the old one."""
+    model_config = _Strict
+    verbal: Optional[float] = Field(default=None, ge=0, le=800)
+    quant: Optional[float] = Field(default=None, ge=0, le=800)
+    writing: Optional[float] = Field(default=None, ge=0, le=6)
+    official: Optional[bool] = None
+
+
+class GPASummary(BaseModel):
+    """CAS-calculated cumulative GPAs (4.0 scale). CAS writes 0 when it didn't
+    calculate one (non-US transcripts), so 0 is dropped as missing upstream."""
+    model_config = _Strict
+    undergraduate: Optional[float] = Field(default=None, ge=0, le=5)
+    overall: Optional[float] = Field(default=None, ge=0, le=5)
+    graduate: Optional[float] = Field(default=None, ge=0, le=5)
 
 
 class ExperienceEntry(BaseModel):
@@ -117,6 +143,17 @@ class StudentRecord(BaseModel):
     experience: Optional[List[ExperienceEntry]] = None
     programs: Optional[List[ProgramEntry]] = None
     interests: Optional[Interests] = None
+    gre: Optional[GRESections] = None
+    gpa_summary: Optional[GPASummary] = None
+    # Only ever "Domestic" or "International", read off the program the
+    # applicant chose ("... - International Students") or the export's status
+    # column. The country itself is never stored.
+    residency: Optional[Literal["Domestic", "International"]] = None
+    awards: Optional[List[str]] = None
+    # Field of study as the applicant typed it (custom_field_background).
+    background: Optional[str] = None
+    # Answers to any application question about courses (distance degree plans).
+    course_answers: Optional[List[str]] = None
     meta: Meta
 
 

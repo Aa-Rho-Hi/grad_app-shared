@@ -1,0 +1,74 @@
+# Prescreen rules from the ECEN grad office (Deshaun Tolbert, 2026-10-02).
+#
+# The app FLAGS each applicant as "Admit" or "Further review" and says why.
+# It never makes a final decision: a person confirms every row. Edit the
+# numbers and wording here; the Prescreen page has a "Re-apply rules" button.
+
+# Minimum GPA on a 4.0 scale. "3.249 or lower" goes to further review.
+gpa_threshold: 3.25
+
+# Who counts as "from the Electrical and Computer Engineering department".
+# Matched (case-insensitive) against the applicant's major / field of study /
+# degree line. A match on any `exclude` term wins over a match here, so
+# "Electrical Engineering Technology" is NOT counted as ECE.
+ece_majors:
+  - electrical engineering
+  - computer engineering
+  - electrical and computer engineering
+  - electrical & computer engineering
+  - electrical computer engineering
+  - ecen
+  - elen
+  - cpen
+  - ceen
+ece_exclude:
+  - technology
+
+# How programs are recognised from the CAS designation name.
+tracks:
+  distance_words: [distance, online]
+  quick_admit_words: [quick admit]
+
+# Degree-plan course rules for distance applicants. Courses must come from
+# config/distance_courses.yaml.
+courses:
+  ms_required: 10              # MS distance, thesis and non-thesis
+  phd_required_with_ms: 6      # PhD distance, applicant already holds an MS
+  phd_required_bachelors: 14   # PhD distance, Bachelor's only
+  max_400_level: 2             # "only up to 2 400-level courses"
+  # Everything else must be 600- or 700-level.
+  allowed_levels: [600, 700]
+  # Prefixes recognised when reading a course list. Only ECEN courses are on
+  # the approved list; others are reported as "not on the approved list".
+  prefixes: [ECEN, ECE, ELEN, CSCE]
+
+# Letters must contain this exact wording. [NAME] stands for the applicant's
+# name. Matching ignores case, spacing, line breaks and punctuation (PDF text
+# extraction scrambles those), but every word has to be there in order.
+# `equivalent_words` treats each pair as the same word, for typos that crept
+# into the official text.
+letters:
+  equivalent_words:
+    assess: access
+  ms_employed: >-
+    We give approval for [NAME] to conduct their MS research in their chosen
+    research topic. We also approve of [NAME] to disseminate the results of
+    their MS research. We are aware that [NAME] does not need on-campus access
+    to TAMU lab facilities and will need to show up in person for final defense.
+  ms_unemployed: >-
+    I, [NAME] am writing to formally declare that, as of the date of this
+    letter, I am not currently employed. Furthermore, I hereby commit and
+    promise that once I secure future employment, I will obtain and provide an
+    official employer verification letter to you within one month (30 days) of
+    my start date. Please accept this signed statement as temporary
+    documentation of my current status.
+  phd_employed: >-
+    We give approval for [NAME] to conduct their Ph.D. research in their chosen
+    research topic. We also approve of [NAME] to disseminate the results of
+    their Ph.D. research. We are aware that [NAME] does not need on-campus
+    access to TAMU lab facilities and will need to show up in person for
+    qualifying exams, prelim oral, and final defense.
+  # Below this share of matching characters a page isn't treated as an attempt
+  # at the letter at all. Between this and an exact match it's "close: check
+  # the wording".
+  close_match: 0.85

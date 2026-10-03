@@ -32,7 +32,9 @@ UNIFIED_SCHEMA_VERSION = "3.0.0"
 
 # keys taken from a validated CSV record into the "application" section
 _APPLICATION_KEYS = ["programs", "education", "english_proficiency",
-                     "gre_results", "experience", "interests"]
+                     "gre_results", "experience", "interests", "gre",
+                     "gpa_summary", "residency", "awards", "background",
+                     "course_answers"]
 
 
 def application_section(rec: Dict[str, Any]) -> Dict[str, Any]:

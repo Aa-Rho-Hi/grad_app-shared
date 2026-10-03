@@ -206,6 +206,35 @@ a summary says; this only decides how much of it fits on screen.
 - **`app.py`** (Flask) — a four-step flow, one screen each: `/` upload (roster + packets: a ZIP, loose PDFs, or a mix), `/step/2` download the roster with the degree column and a blank `status`, `/step/3` take the marked-up sheet back, `/triage` the swipe deck. Nothing is summarized before step 3, so the first screen is a plain upload page rather than a wall of cards. `/applicants` keeps the browse view (every applicant, decided or not) off the flow. Also: attach a single SOP/LOR/resume per student; a `/reset` route to clear processed data (optionally purging raw uploads too); per-student detail (identity, programs, education, test scores, sources-on-file, document analysis); data-to-verify flags; quarantine view; written summaries; download. No login by default (single-reviewer, localhost tool) but ships with upload-size caps, extension allow-lists, a same-origin/CSRF check, and opt-in Basic Auth / remote-binding guards — see "Security & privacy guardrails" in `README.md`.
 - **`run.py`** / **`add_document.py`** / **`ingest_zip.py`** — CLIs for the application path, single-document ingest, and ZIP-batch ingest. `run.py` also owns `reindex()` (rebuilds `students/_all.json` and `reports/_summaries.md`, and runs `reconcile`).
 
+## Prescreen (`screening.py`, `prescreen_report.py`)
+
+The grad office asked for rule-based flags on three tracks (Quick Admit on
+campus, MS Distance, PhD Distance). This is the one place the app applies a
+threshold, so it is built to stay honest about it:
+
+- **Flags, not decisions.** Outcomes are only "Admit" or "Further review", and
+  every non-admit lists its reasons. Anything a machine can't confirm (a
+  letterhead, a signature, whether the advisor is TAMU faculty) goes in a
+  "check by hand" list even on an Admit.
+- **No guessed conversions.** The 3.25 rule is stated on a 4.0 scale; a GPA on
+  another scale goes to further review rather than being converted. When an
+  applicant's schools disagree across the threshold, a person picks.
+- **Exact wording, robustly compared.** Letters are matched on a lower-cased,
+  letters-and-digits-only form of the page so PDF spacing and quotes can't fail
+  a correct letter, but every word must be present in order. A near miss
+  (most of the wording in 3+ word runs) is reported as "close", never as met.
+- **Evidence kept at ingest.** `screening.evidence_pages` keeps the packet pages
+  with course codes or letter/advisor wording (`packet_evidence` on the record,
+  capped at 60 pages) so rules can re-run without the PDFs.
+- **Cached with a fingerprint.** `Store._index_entry` caches `profile` and
+  `screening` on the index entry with a hash of the two config files;
+  `Store.index()` recomputes entries cached under different rules, and
+  `Store.refresh_index()` (the "Re-apply rules" button) persists them.
+
+`prescreen_report.py` writes the three workbooks from index entries: values,
+not formulas (applicant text starting with "=" is forced to text), a link to
+the applicant's page on every row, a Summaries tab and a Rules tab.
+
 ## Data-quality flags vs. quarantine
 
 - **Quarantine** — the row failed validation (e.g. an out-of-range value) and could not be recorded; shown with reasons.

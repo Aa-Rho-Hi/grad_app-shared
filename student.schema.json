@@ -44,6 +44,30 @@
           "default": null,
           "title": "State"
         },
+        "degree": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Degree"
+        },
+        "major": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Major"
+        },
         "gpa": {
           "anyOf": [
             {
@@ -122,6 +146,46 @@
           ],
           "default": null,
           "title": "Best Toefl Total"
+        },
+        "best_duolingo": {
+          "anyOf": [
+            {
+              "maximum": 160,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Best Duolingo"
+        },
+        "best_pte": {
+          "anyOf": [
+            {
+              "maximum": 90,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Best Pte"
+        },
+        "elpe": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Elpe"
         }
       },
       "title": "EnglishProficiency",
@@ -191,6 +255,118 @@
         "normalized_4"
       ],
       "title": "GPA",
+      "type": "object"
+    },
+    "GPASummary": {
+      "additionalProperties": false,
+      "description": "CAS-calculated cumulative GPAs (4.0 scale). CAS writes 0 when it didn't\ncalculate one (non-US transcripts), so 0 is dropped as missing upstream.",
+      "properties": {
+        "undergraduate": {
+          "anyOf": [
+            {
+              "maximum": 5,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Undergraduate"
+        },
+        "overall": {
+          "anyOf": [
+            {
+              "maximum": 5,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overall"
+        },
+        "graduate": {
+          "anyOf": [
+            {
+              "maximum": 5,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Graduate"
+        }
+      },
+      "title": "GPASummary",
+      "type": "object"
+    },
+    "GRESections": {
+      "additionalProperties": false,
+      "description": "GRE section scores as the export reports them. The 130-170 scale is\ncurrent; older exports carry the 200-800 scale, so the cap is the old one.",
+      "properties": {
+        "verbal": {
+          "anyOf": [
+            {
+              "maximum": 800,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verbal"
+        },
+        "quant": {
+          "anyOf": [
+            {
+              "maximum": 800,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quant"
+        },
+        "writing": {
+          "anyOf": [
+            {
+              "maximum": 6,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Writing"
+        },
+        "official": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Official"
+        }
+      },
+      "title": "GRESections",
       "type": "object"
     },
     "IELTSAttempt": {
@@ -655,6 +831,86 @@
         }
       ],
       "default": null
+    },
+    "gre": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GRESections"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "gpa_summary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GPASummary"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "residency": {
+      "anyOf": [
+        {
+          "enum": [
+            "Domestic",
+            "International"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Residency"
+    },
+    "awards": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Awards"
+    },
+    "background": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Background"
+    },
+    "course_answers": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Course Answers"
     },
     "meta": {
       "$ref": "#/$defs/Meta"

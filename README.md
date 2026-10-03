@@ -67,6 +67,39 @@ pandas/openpyxl, and numeric-looking IDs (e.g. `1001.0`) are cleaned back to tex
 - **GPA scale varies per university**, so it is auto-detected per value (≤4.3→4.0, ≤5→5.0, ≤10→10.0, ≤20→20.0, else→100) and normalized to 4.0. Force a scale with `gpa.gpa_scale` in `config/csv_field_map.yaml`.
 - **Data-quality flags** (e.g. "No GRE score on file") are factual notes for the reviewer, shown in the UI — not judgements.
 
+## Prescreen (grad office rules)
+
+The ECEN grad office's admit rules, applied as **flags, never decisions**:
+each applicant comes out "Admit" or "Further review" with the reasons spelled
+out, plus a "check by hand" list (letterhead, signatures, the advisor being
+TAMU faculty) that a person confirms even on an Admit.
+
+| Track (from the CAS designation) | Admit when |
+|---|---|
+| Quick Admit, on campus | ECE department and GPA 3.25+ (everyone else: further review) |
+| MS Distance, non-thesis | ECE, GPA 3.25+, 10 courses from the approved distance list (max two 400-level, rest 600/700) |
+| MS Distance, thesis | all of the above, plus a faculty advisor confirmation and the employer letter (Option A) or unemployment statement (Option B) in the exact required wording |
+| PhD Distance | 6 approved courses with an MS (14 with a Bachelor's only) and the PhD employer letter in the exact wording |
+
+- **Config, not code.** Thresholds, the ECE major list and the letter wording
+  are in `config/screening_rules.yaml`; the approved course list (copied from
+  the department's distance-learning page) is `config/distance_courses.yaml`.
+  After editing either, press **Re-apply rules** on the Prescreen page.
+- **Spreadsheets.** `/prescreen` downloads three workbooks: a summary for Quick
+  Admit and the other on-campus programs, and separate MS Distance and PhD
+  Distance files. Each has the fields the office asked for (schools + GPA,
+  degree type, major, GRE, English proficiency, awards, domestic/international),
+  a "Summaries" tab with the full written summary, a "Rules" tab, and a
+  clickable link on every row to the applicant's page. The review sheet
+  (`/review-sheet`) gets the same link column. Set `GRADAPP_PUBLIC_URL` if
+  people reach the app at a different address than the one you download from.
+- **Domestic / International** is the one field derived from citizenship: only
+  that two-word label is stored (read off the "... - International Students"
+  designation first, the export's citizenship status second). The country is
+  never read, and no rule uses the label.
+- Letters and course plans are read from the packet pages kept at ingest
+  (`packet_evidence` on the record), so rules re-run without re-uploading.
+
 ## Documents (resumes / SOPs / LORs)
 
 Supporting documents extend only the extraction layer — the schema, summary step,

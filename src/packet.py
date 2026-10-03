@@ -352,5 +352,8 @@ def segment(path: str, kw: Dict[str, Any] | None = None) -> Dict[str, Any]:
             flags.append(f"The {label} section spans non-adjacent pages "
                          f"({', '.join(map(str, span))}) — verify the split.")
 
+    # Every page's text and label too: the prescreen rules look for course
+    # lists and letters on pages the section split deliberately drops
+    # (forms, "ignore"), so they need the raw pages, not just the sections.
     return {"sections": sections, "order": order, "page_count": len(pages),
-            "flags": flags, "ocr": ocr_info}
+            "flags": flags, "ocr": ocr_info, "pages": pages, "labels": labels}

@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Prescreen — Grad App{% endblock %}
+{% block body %}
+
+<p class="back"><a href="{{ url_for('index') }}">← Dashboard</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('applicants') }}">All applicants</a></p>
+
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+    <div style="max-width:640px">
+      <h3 style="margin:0">Prescreen</h3>
+      <p class="muted" style="margin:4px 0 0">The grad office's rules, applied as flags.
+        <b>Admit</b> means every rule was met on what the app could read;
+        <b>Further review</b> says what wasn't met or couldn't be confirmed.
+        A person confirms every row; nothing here is a decision.</p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <a href="{{ url_for('download_prescreen_zip') }}"><button type="button" class="primary">⬇ All three spreadsheets (.zip)</button></a>
+      <form action="{{ url_for('prescreen_reapply') }}" method="post" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" title="Run the rules again after editing config/screening_rules.yaml or the course list">↻ Re-apply rules</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="stats">
+    {% for key in ['quick_admit', 'ms_distance', 'phd_distance', 'on_campus', 'other_distance', 'no_program'] %}
+      {% set c = counts.get(key) %}
+      {% if c %}
+      <a class="stat" href="{{ url_for('prescreen', track=key) }}">
+        <b>{{ c.total }}</b><span>{{ labels[key] }}
+        {% if c.admit or c.review %}<br>{{ c.admit }} admit · {{ c.review }} review{% endif %}</span></a>
+      {% endif %}
+    {% endfor %}
+  </div>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+    <a href="{{ url_for('download_prescreen', kind='summary') }}"><button type="button">⬇ Summary (Quick Admit &amp; on campus)</button></a>
+    <a href="{{ url_for('download_prescreen', kind='ms-distance') }}"><button type="button">⬇ MS Distance</button></a>
+    <a href="{{ url_for('download_prescreen', kind='phd-distance') }}"><button type="button">⬇ PhD Distance</button></a>
+  </div>
+  <p class="muted" style="margin:10px 0 0">Every row in the spreadsheets links back to that
+    applicant's page here. Course rules use the
+    <a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">approved distance course list</a>
+    as copied on {{ source.retrieved }}.</p>
+</div>
+
+{% if total %}
+<div class="card">
+  <div class="filters" style="margin-top:0">
+    <div class="seg">
+      <a href="{{ url_for('prescreen', track=track) }}"><button type="button" class="{{ 'on' if not outcome }}">All</button></a>
+      <a href="{{ url_for('prescreen', track=track, outcome=ADMIT) }}"><button type="button" class="{{ 'on' if outcome == ADMIT }}">Admit</button></a>
+      <a href="{{ url_for('prescreen', track=track, outcome=REVIEW) }}"><button type="button" class="{{ 'on' if outcome == REVIEW }}">Further review</button></a>
+    </div>
+    {% if track %}<span class="chip">{{ labels[track] }} <a href="{{ url_for('prescreen', outcome=outcome) }}" style="margin-left:4px">✕</a></span>{% endif %}
+    <span class="muted">{{ filtered }} of {{ total }}</span>
+  </div>
+
+  <table style="margin-top:10px">
+    <thead><tr><th>Applicant</th><th>Track</th><th>Prescreen</th><th>Why / what's missing</th></tr></thead>
+    <tbody>
+    {% for e in rows %}
+      {% set s = e.screening or {} %}
+      <tr>
+        <td><a href="{{ url_for('student', cas_id=e.cas_id) }}">{{ e.name }}</a>
+            <div class="muted" style="font-size:12px">{{ e.cas_id }}{% if e.profile and e.profile.residency %} · {{ e.profile.residency }}{% endif %}</div></td>
+        <td>{{ s.track_label }}{% if s.track == 'ms_distance' %}<div class="muted" style="font-size:12px">{{ 'thesis' if s.thesis else 'non-thesis' if s.thesis == false else 'thesis not stated' }}</div>{% endif %}</td>
+        <td>{% if s.outcome == ADMIT %}<span class="chip s">Admit</span>
+            {% elif s.outcome == REVIEW %}<span class="chip d-tbd">Further review</span>
+            {% else %}<span class="muted">no rule</span>{% endif %}</td>
+        <td style="font-size:13px">{% for r in s.reasons %}<div>• {{ r }}</div>{% endfor %}
+            {% for v in s.verify %}<div class="muted">check: {{ v }}</div>{% endfor %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">Nobody matches this filter.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if pages > 1 %}
+<div class="card" style="display:flex;align-items:center;justify-content:center;gap:14px">
+  {% if page > 1 %}<a href="{{ url_for('prescreen', track=track, outcome=outcome, page=page-1) }}"><button type="button">← Previous</button></a>{% endif %}
+  <span class="muted">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="{{ url_for('prescreen', track=track, outcome=outcome, page=page+1) }}"><button type="button">Next →</button></a>{% endif %}
+</div>
+{% endif %}
+{% else %}
+<div class="card"><p class="muted">No applicants yet. Upload a roster and packets on the home page first.</p></div>
+{% endif %}
+
+{% endblock %}

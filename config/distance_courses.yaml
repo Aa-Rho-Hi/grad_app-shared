@@ -1,0 +1,78 @@
+# Approved online/distance courses for ECEN graduate degrees.
+#
+# Source: https://engineering.tamu.edu/electrical/academics/degrees/graduate/distance-learning/courses-offered.html
+# Copied 2026-10-03. When the department updates that page, update this list
+# (the app re-applies the rules on the Prescreen page; nothing else changes).
+#
+# The page also lists a few 200/300-level courses. They are kept here because
+# they are on the page, but the rules only count 400-level (max two) and
+# 600/700-level courses toward a degree plan, so listing one of them is flagged.
+source_url: https://engineering.tamu.edu/electrical/academics/degrees/graduate/distance-learning/courses-offered.html
+retrieved: 2026-10-03
+courses:
+  ECEN 215: Principles of Electrical Engineering
+  ECEN 303: Random Signals and Systems
+  ECEN 314: Signals and Systems
+  ECEN 322: Electric and Magnetic Fields
+  ECEN 340: Electric Energy Conversion
+  ECEN 350: Computer Architecture and Design
+  ECEN 415: Physical and Economical Operations of Sustainable Energy Systems
+  ECEN 420: Linear Control Systems
+  ECEN 426: Security of Embedded Systems
+  ECEN 444: Digital Signal Processing
+  ECEN 469: Advanced Computer Architecture
+  ECEN 474: VLSI Circuit Design
+  ECEN 601: Mathematical Methods in Signal Processing
+  ECEN 602: Computer Communications and Networking
+  ECEN 605: Linear Multivariable Systems
+  ECEN 607: Advanced Analog Circuit Design Techniques
+  ECEN 608: Modern Control
+  ECEN 609: Adaptive Control
+  ECEN 610: Mixed Signal Interfaces
+  ECEN 613: Rectifier and Inverter Circuits
+  ECEN 614: Power System State Estimation
+  ECEN 615: Electric Power Systems Analysis Methods
+  ECEN 620: Network Theory
+  ECEN 622: Active Network Synthesis
+  ECEN 628: Robust and Optimal Control
+  ECEN 629: Applied Convex Optimization
+  ECEN 632: Motor Drive Dynamics
+  ECEN 635: Electromagnetic Theory
+  ECEN 636: Phased Arrays
+  ECEN 637: Numerical Methods in Electromagnetics
+  ECEN 638: Antennas and Propagation
+  ECEN 642: Digital Image Processing and Computer Vision
+  ECEN 644: Discrete-Time Systems
+  ECEN 647: Information Theory
+  ECEN 649: Pattern Recognition
+  ECEN 662: Estimation & Detection Theory
+  ECEN 663: Data Compression with Applications to Speech and Video
+  ECEN 665: Integrated CMOS RF Circuits
+  ECEN 667: Power System Stability
+  ECEN 669: Engineering Applications in Genomics
+  ECEN 676: Advanced Computer Architecture
+  ECEN 687: Introduction to VLSI Design Automation
+  ECEN 704: VLSI Circuit Design
+  ECEN 710: Switching Power Supplies
+  ECEN 713: Data Sciences and Appliances for Modern Power
+  ECEN 714: Digital Integrated Circuit Design
+  ECEN 715: Physical and Economical Operations of Sustainable Energy Systems
+  ECEN 716: Smart Power Distribution Systems Analysis and Operation
+  ECEN 720: High-Speed Link Circuits and Systems
+  ECEN 721: Optical Interconnects Circuits and Systems
+  ECEN 722: Field Programmable Gate Arrays Information Processing Systems
+  ECEN 723: Introduction to Formal Verification
+  ECEN 724: Visual Navigation and Foundation Models for Autonomy
+  ECEN 732: Online Decision Making and Learning
+  ECEN 740: Machine Learning Engineering
+  ECEN 743: Reinforcement Learning
+  ECEN 744: Scientific Machine Learning
+  ECEN 749: Microprocessor Systems Design
+  ECEN 750: Design and Analysis of Communication Networks
+  ECEN 756: Game Theory
+  ECEN 757: Distributed Systems and Cloud Computing
+  ECEN 758: Data Mining and Analysis
+  ECEN 759: Hardware Security
+  ECEN 760: Introduction to Probabilistic Graphical Models
+  ECEN 766: Algorithms in Structural Bioinformatics
+  ECEN 772: Introduction to Microelectromechanical Devices and Systems

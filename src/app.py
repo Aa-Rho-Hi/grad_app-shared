@@ -40,6 +40,7 @@ at data/audit.log (method/path/status only -- no applicant data).
 from __future__ import annotations
 
 import functools
+import io
 import logging
 import os
 import secrets
@@ -65,6 +66,10 @@ from .triage import (PROF_DECISIONS, SWIPES, ProfessorError, add_professor,
                      professor_by_id, professor_deck, queues, remove_professor,
                      save_professors, shortlisted, update_professor)
 from .status_report import write_status_report
+from .prescreen_report import FILES as PRESCREEN_FILES, counts as prescreen_counts, \
+    write_all as write_prescreen, zip_bytes
+from .screening import (ADMIT, REVIEW, SEPARATE_FILES, TRACK_LABELS, courses_source,
+                        evaluate as prescreen_evaluate, profile as prescreen_profile)
 from . import taskq
 from .storage import blobs_for, use_for_config
 from .store import Store, db_path_for
@@ -1317,7 +1322,7 @@ def review_sheet():
         # every one of their columns. On more than one instance that upload
         # probably landed somewhere else.
         _blobs().ensure_tree(raw)
-        write_review_sheet(entries, raw, out)
+        write_review_sheet(entries, raw, out, link_base=_public_base())
         _blobs().publish(out)
     except Exception as exc:
         app.logger.exception("Error building the review spreadsheet")
@@ -1355,6 +1360,85 @@ def download_summaries():
         fh.write(summaries_markdown(entries))
     _blobs().publish(path)
     return _serve(path, "applicant_summaries.md")
+
+
+# ------------------------------------------------------------- prescreen --
+
+def _public_base() -> str:
+    """The address links in exported spreadsheets point at. The request's own
+    address by default; GRADAPP_PUBLIC_URL when people reach the app by a
+    different name than the one this request used (a proxy, a custom domain)."""
+    return os.environ.get("GRADAPP_PUBLIC_URL", "").strip() or request.url_root
+
+
+_TRACK_SORT = {"quick_admit": 0, "ms_distance": 1, "phd_distance": 2, "on_campus": 3,
+               "other_distance": 4, "no_program": 5}
+_OUTCOME_SORT = {ADMIT: 0, REVIEW: 1, "": 2}
+
+
+@app.route("/prescreen")
+@role_required(ADVISOR)
+def prescreen():
+    """The grad office's rules, applied as flags, plus the three spreadsheets."""
+    entries = _summaries()
+    track = request.args.get("track", "")
+    outcome = request.args.get("outcome", "")
+    shown = [e for e in entries
+             if (not track or (e.get("screening") or {}).get("track") == track)
+             and (not outcome or (e.get("screening") or {}).get("outcome") == outcome)]
+    shown.sort(key=lambda e: (_TRACK_SORT.get((e.get("screening") or {}).get("track"), 9),
+                              _OUTCOME_SORT.get((e.get("screening") or {}).get("outcome", ""), 9),
+                              str(e.get("name", "")).lower()))
+    rows, page, pages = _page_of(shown, request.args.get("page", 1, type=int))
+    return render_template("prescreen.html", counts=prescreen_counts(entries),
+                           labels=TRACK_LABELS, rows=rows, track=track, outcome=outcome,
+                           page=page, pages=pages, total=len(entries), filtered=len(shown),
+                           separate=SEPARATE_FILES, source=courses_source(),
+                           ADMIT=ADMIT, REVIEW=REVIEW)
+
+
+@app.route("/prescreen/reapply", methods=["POST"])
+@limiter.limit("30/hour")
+@role_required(ADVISOR)
+def prescreen_reapply():
+    """Re-run the rules (and re-render summaries) for everyone on file, after
+    config/screening_rules.yaml or the course list changed."""
+    n = _store().refresh_index()
+    flash(f"Rules re-applied to {n} applicant(s).")
+    return redirect(url_for("prescreen"))
+
+
+def _prescreen_files() -> Dict[str, str]:
+    outdir = os.path.join(DATA, "reports")
+    paths = write_prescreen(_summaries(), _public_base(), outdir)
+    for path in paths.values():
+        _blobs().publish(path)
+    return paths
+
+
+@app.route("/download/prescreen/<kind>.xlsx")
+@role_required(ADVISOR)
+def download_prescreen(kind: str):
+    if kind not in PRESCREEN_FILES:
+        abort(404)
+    if not _summaries():
+        flash("No applicants yet — upload a file first.")
+        return redirect(url_for("index"))
+    path = _prescreen_files()[kind]
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return _serve(path, PRESCREEN_FILES[kind].replace(".xlsx", f"_{stamp}.xlsx"))
+
+
+@app.route("/download/prescreen.zip")
+@role_required(ADVISOR)
+def download_prescreen_zip():
+    if not _summaries():
+        flash("No applicants yet — upload a file first.")
+        return redirect(url_for("index"))
+    data = zip_bytes(_prescreen_files())
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return send_file(io.BytesIO(data), as_attachment=True, mimetype="application/zip",
+                     download_name=f"prescreen_{stamp}.zip")
 
 
 @app.route("/triage")
@@ -1549,7 +1633,9 @@ def student(cas_id: str):
     rec = summary_view(unified)                 # flattened view for the template
     summary = {"summary_text": unified.get("summary", "")}
     return render_template("student.html", rec=rec, summary=summary,
-                           unified=unified, sources_present=sources_present(unified))
+                           unified=unified, sources_present=sources_present(unified),
+                           screening=prescreen_evaluate(unified),
+                           profile=prescreen_profile(unified), ADMIT=ADMIT)
 
 
 if __name__ == "__main__":

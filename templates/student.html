@@ -13,6 +13,29 @@
 </div>
 
 <div class="card">
+  <h3 style="margin-top:0">Prescreen
+    {% if screening.outcome == ADMIT %}<span class="chip s">Admit</span>
+    {% elif screening.outcome %}<span class="chip d-tbd">{{ screening.outcome }}</span>
+    {% else %}<span class="chip">no rule for this program</span>{% endif %}</h3>
+  <div class="muted">{{ screening.track_label }}{% if screening.track == 'ms_distance' %} · {{ 'thesis' if screening.thesis else 'non-thesis' if screening.thesis == false else 'thesis not stated' }}{% endif %}{% if screening.program %} · {{ screening.program }}{% endif %}</div>
+  {% if screening.reasons %}<div style="margin-top:8px">{% for r in screening.reasons %}<div>• {{ r }}</div>{% endfor %}</div>{% endif %}
+  {% if screening.verify %}<div style="margin-top:6px">{% for v in screening.verify %}<div class="muted">check by hand: {{ v }}</div>{% endfor %}</div>{% endif %}
+  {% set c = screening.checks.courses %}
+  {% if c %}<div style="margin-top:8px"><b>Courses</b> · {{ c.counted }} of {{ c.required }} counted
+    {% if c.listed %}<span class="muted">({{ c.listed|join(', ') }}{% if c.source %}; from {{ c.source }}{% endif %})</span>{% else %}<span class="muted">(no course list found)</span>{% endif %}</div>{% endif %}
+  <div class="kv" style="margin-top:10px">
+    {% if profile.residency %}<div><b>Domestic / International:</b> {{ profile.residency }}</div>{% endif %}
+    {% if profile.schools %}<div><b>Schools &amp; GPA:</b> {{ profile.schools|join(' · ') }}</div>{% endif %}
+    {% if profile.degree_type %}<div><b>Degree:</b> {{ profile.degree_type }}</div>{% endif %}
+    {% if profile.major %}<div><b>Major:</b> {{ profile.major }}</div>{% endif %}
+    {% if profile.gre %}<div><b>GRE:</b> {{ profile.gre }}</div>{% endif %}
+    {% if profile.english %}<div><b>English proficiency:</b> {{ profile.english }}</div>{% endif %}
+    {% if profile.awards %}<div><b>Awards:</b> {{ profile.awards|join(' · ') }}</div>{% endif %}
+  </div>
+  <p class="muted" style="margin-top:8px">A flag from the grad office's rules, not a decision. <a href="{{ url_for('prescreen') }}">All prescreen results</a></p>
+</div>
+
+<div class="card">
   <h3 style="margin-top:0">Sources on file</h3>
   <div class="chips">
     {% set srcs = unified.sources %}

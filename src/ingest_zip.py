@@ -26,6 +26,7 @@ from .documents import build_section
 from .merge import merge_identity, summary_view, upsert_source
 from .packet import cas_id_from_filename, name_from_filename, segment
 from .ratings import extract_likert_ratings
+from .screening import evidence_pages, merge_evidence
 from .run import reindex
 from .store import Store, db_path_for
 from .template import render
@@ -135,6 +136,10 @@ def _ingest_packets(items, outdir: str, report: Dict[str, Any], progress=None) -
                         "parsed — verify manually.")
                 if ts and note in unified["warnings"]:
                     unified["warnings"].remove(note)
+            # Keep the pages the prescreen rules read (course plans, advisor
+            # and employer letters) so they can be re-run without a re-upload.
+            merge_evidence(unified, name, evidence_pages(
+                seg.get("pages") or [], seg.get("labels") or [], file=name))
             # record OCR status explicitly (not as a "problem" warning)
             if oi.get("ocr_used"):
                 unified["ocr"] = {"scanned_pages": oi.get("scanned_pages", 0),

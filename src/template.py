@@ -32,6 +32,7 @@ import re
 from typing import Any, Dict, List
 
 from .analyze import motivation_sentences
+from .screening import awards_from_text
 
 # Clip budgets (characters). Long enough to carry a full claim from the source
 # sentence — a résumé bullet that stops at "in order to obtain better" has told
@@ -166,7 +167,18 @@ def _test_bits(rec: dict, docs: dict) -> tuple[List[str], bool]:
         bits.append(f"IELTS {eng['best_ielts_overall']}")
     if "best_toefl_total" in eng:
         bits.append(f"TOEFL {eng['best_toefl_total']:.0f}")
-    if rec.get("gre_results"):
+    if "best_duolingo" in eng:
+        bits.append(f"Duolingo {eng['best_duolingo']:.0f}")
+    if "best_pte" in eng:
+        bits.append(f"PTE {eng['best_pte']:.0f}")
+    if eng.get("elpe"):
+        bits.append(f"ELPE {eng['elpe']}")
+    gre = rec.get("gre") or {}
+    if gre:
+        sec = " ".join(f"{k}{gre[key]:g}" for k, key in (("V", "verbal"), ("Q", "quant"),
+                                                         ("AW ", "writing")) if gre.get(key))
+        bits.append(f"GRE {sec}" + ("" if gre.get("official") else " (self-reported)"))
+    elif rec.get("gre_results"):
         vals = ", ".join(str(int(v)) if float(v).is_integer() else str(v)
                          for v in rec["gre_results"])
         ok = any(260 <= float(v) <= 340 for v in rec["gre_results"])
@@ -178,7 +190,7 @@ def _test_bits(rec: dict, docs: dict) -> tuple[List[str], bool]:
         bits.append(f"IELTS {ts['ielts_overall']} (parsed)"); parsed = True
     if "best_toefl_total" not in eng and "toefl_total" in ts:
         bits.append(f"TOEFL {ts['toefl_total']} (parsed)"); parsed = True
-    if not rec.get("gre_results") and ("gre_verbal" in ts or "gre_quant" in ts):
+    if not gre and not rec.get("gre_results") and ("gre_verbal" in ts or "gre_quant" in ts):
         sub = []
         if "gre_verbal" in ts:
             sub.append(f"V{ts['gre_verbal']}")
@@ -233,7 +245,8 @@ def render(rec: Dict[str, Any]) -> str:
     email = rec.get("personal", {}).get("email")
 
     # ---- Header: who, the numbers, the program. One idea per line. ----
-    head: List[str] = [" · ".join([name] + ([email] if email else []))]
+    head: List[str] = [" · ".join([name] + ([email] if email else [])
+                                  + ([rec["residency"]] if rec.get("residency") else []))]
     if facts:
         head.append(" · ".join(facts))
     progs = rec.get("programs", [])
@@ -250,6 +263,11 @@ def render(rec: Dict[str, Any]) -> str:
     # Structured institutions are authoritative; the resume fills in the degree.
     insts = [e.get("college_name") for e in rec.get("education", []) if e.get("college_name")]
     seen = re.sub(r"\W+", "", " ".join(insts)).lower()
+    # When the export carries each school's degree and major, say so beside
+    # the school; that's the line the grad office reads first.
+    insts = [e["college_name"] + (f" ({', '.join(x for x in (e.get('degree'), e.get('major')) if x)})"
+                                  if e.get("degree") or e.get("major") else "")
+             for e in rec.get("education", []) if e.get("college_name")]
     degrees = [d for d in _items(
         [e for e in resume_prof.get("education", []) if _DEGREE_RE.search(str(e))], 3, 140)
         if re.sub(r"\W+", "", d).lower() not in seen]
@@ -273,14 +291,24 @@ def render(rec: Dict[str, Any]) -> str:
     # add something (software, certifications, coursework).
     prep = [p for p in _items(resume_prof.get("technical_preparation", []), 4)
             if not re.match(r"^\s*skills?\b\s*[:\-–]", p, re.I)]
-    background = (_bullets(bg) + _labeled("Areas", areas, "; ")
+    field = [rec["background"]] if rec.get("background") else []
+    background = (_bullets(bg) + _labeled("Field", field) + _labeled("Areas", areas, "; ")
                   + _labeled("Skills", skills[:16]) + _bullets(prep[:3]))
 
     exp = _items(resume_prof.get("experience", []), 6)
     if not exp and resume:
         exp = ["resume captured, but no confident experience lines extracted"]
     projects = _items(resume_prof.get("projects", []), 4)
-    notable = _items(resume_prof.get("distinctions", []), 4)
+    # Awards first (the roster's own award fields, then the résumé's Awards /
+    # Honors block), then the résumé's other distinctions.
+    award_lines = list(rec.get("awards") or [])
+    for line in awards_from_text((resume or {}).get("text") or ""):
+        if line not in award_lines:
+            award_lines.append(line)
+    awards = _items(award_lines, 4)
+    seen_awards = {re.sub(r"\W+", "", a).lower()[:60] for a in awards}
+    notable = [d for d in _items(resume_prof.get("distinctions", []), 4)
+               if re.sub(r"\W+", "", d).lower()[:60] not in seen_awards]
 
     # ---- In their words: quoted, never interpreted. The old "SOP detail" and
     # "Motivation" blocks overlapped heavily, so the quoted goal and the parsed
@@ -335,6 +363,7 @@ def render(rec: Dict[str, Any]) -> str:
     paras += [_section("Background", background),
               _section("Experience", _bullets(exp)),
               _section("Projects", _bullets(projects)),
+              _section("Awards", _bullets(awards)),
               _section("Notable", _bullets(notable)),
               _section("In their words (SOP)", words),
               _section("Letters", letters),

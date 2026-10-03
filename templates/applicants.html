@@ -5,7 +5,8 @@
 
 <p class="back"><a href="{{ url_for('index') }}">← Dashboard</a>
    {% if tbd_count %}&nbsp;·&nbsp; <a href="{{ url_for('triage') }}">Triage ({{ tbd_count }} tbd)</a>{% endif %}
-   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Professor queues</a></p>
+   &nbsp;·&nbsp; <a href="{{ url_for('professors_view') }}">Professor queues</a>
+   &nbsp;·&nbsp; <a href="{{ url_for('prescreen') }}">Prescreen</a></p>
 
 {% if summaries %}
 <div class="card">

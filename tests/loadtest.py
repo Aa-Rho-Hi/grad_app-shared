@@ -144,7 +144,9 @@ def main(n=500, scratch="/tmp/load-scratch"):
              ("/professors", "/professors"), ("/prof?as=gratz-paul", "/prof?as=gratz-paul"),
              ("/download/summaries", "/download/summaries"),
              ("/download/status.xlsx", "/download/status.xlsx"),
-             ("/review-sheet", "/review-sheet")]
+             ("/review-sheet", "/review-sheet"),
+             ("/prescreen", "/prescreen"),
+             ("/download/prescreen.zip", "/download/prescreen.zip")]
     worst = []
     for label, url in pages:
         tracemalloc.start()
